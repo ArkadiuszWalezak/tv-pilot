@@ -1,7 +1,7 @@
 {
   "name": "tv-pilot",
   "appName": "Telewizja",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Obsługa pilotem i telewizja na pełnym ekranie: zmiana kanałów CH+/CH-, wybór numerem, lista kanałów i pasek informacji.",
   "packageType": "mods",
   "websiteURL": "https://go.toya.net.pl/tv",
