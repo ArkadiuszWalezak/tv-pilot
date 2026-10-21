@@ -14,7 +14,21 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.2-test' };
+  window.__tvNav = { version: '1.0.3-test' };
+
+  // Przeglądarka aplikacji na telewizorze przedstawia się bez słowa „Chrome”, więc strona bierze ją za Safari
+  // i wybiera zabezpieczenie Apple (FairPlay), którego telewizor nie ma. Dopisujemy „Chrome/wersja”,
+  // żeby strona wybrała Widevine, które telewizor obsługuje.
+  (function fixUserAgent() {
+    try {
+      var ua = navigator.userAgent;
+      if (/chrome|android/i.test(ua) || !/safari/i.test(ua)) return;
+      var m = /(\d+\.\d+\.\d+\.\d+)/.exec(ua);
+      var fixed = ua.replace(/ ((?:TV )?Safari\/)/, ' Chrome/' + (m ? m[1] : '94.0.0.0') + ' $1');
+      if (fixed === ua) return;
+      Object.defineProperty(navigator, 'userAgent', { get: function () { return fixed; }, configurable: true });
+    } catch (e) { /* nie udało się — zostaje oryginalny */ }
+  })();
 
   // ---------------------------------------------------------------- klawisze
   var K = {
@@ -243,6 +257,11 @@
       videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.640028"', robustness: '' }],
       distinctiveIdentifier: 'optional', persistentState: 'optional', sessionTypes: ['temporary']
     }], false);
+    probe('Widevine (trwały stan)', 'com.widevine.alpha', [{
+      initDataTypes: ['cenc'],
+      videoCapabilities: [{ contentType: v }],
+      persistentState: 'required'
+    }], false);
     probe('PlayReady', 'com.microsoft.playready', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: v }] }], true);
     probe('ClearKey', 'org.w3.clearkey', [{ initDataTypes: ['cenc', 'keyids'], videoCapabilities: [{ contentType: v }] }], false);
   }
@@ -252,13 +271,29 @@
     var orig = navigator.requestMediaKeySystemAccess;
     if (orig && !orig.__tvnav) {
       diag.orig = orig;
-      var wrapped = function (ks) {
+      var wrapped = function (ks, cfgs) {
         var rec = { ks: String(ks).replace('com.', '').replace('.alpha', ''), res: '…' };
         diag.calls.push(rec);
         if (diag.calls.length > 5) diag.calls.shift();
         renderDiag();
         var p = orig.apply(navigator, arguments);
-        if (p && p.then) p.then(function () { rec.res = 'TAK'; renderDiag(); }, function (e) { rec.res = 'NIE: ' + dShort(dErr(e), 60); renderDiag(); });
+        // gdy telewizor odmówi tylko z powodu „trwałego stanu”, pytamy jeszcze raz bez tego wymogu
+        if (p && p.then && /widevine|playready/i.test(String(ks)) && cfgs && cfgs.length) {
+          p = p.then(null, function (err) {
+            var relaxed = [], changed = false;
+            for (var i = 0; i < cfgs.length; i++) {
+              var o = {}, c = cfgs[i];
+              for (var k in c) o[k] = c[k];
+              if (o.persistentState === 'required') { o.persistentState = 'optional'; changed = true; }
+              if (o.distinctiveIdentifier === 'required') { o.distinctiveIdentifier = 'optional'; changed = true; }
+              relaxed.push(o);
+            }
+            if (!changed) throw err;
+            rec.retried = true;
+            return orig.call(navigator, ks, relaxed);
+          });
+        }
+        if (p && p.then) p.then(function () { rec.res = rec.retried ? 'TAK (po ponowieniu)' : 'TAK'; renderDiag(); }, function (e) { rec.res = 'NIE: ' + dShort(dErr(e), 60); renderDiag(); });
         return p;
       };
       wrapped.__tvnav = true;
