@@ -14,7 +14,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.1' };
+  window.__tvNav = { version: '1.0.2-test' };
 
   // ---------------------------------------------------------------- klawisze
   var K = {
@@ -147,7 +147,12 @@
     '#tvnav-list .tv-rl img{max-width:100%;max-height:100%;}',
     '#tvnav-list .tv-rt{flex:1;min-width:0;}',
     '#tvnav-list .tv-rname{font-size:2.9vh;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-    '#tvnav-list .tv-rprog{font-size:2.3vh;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:.4vh;}'
+    '#tvnav-list .tv-rprog{font-size:2.3vh;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:.4vh;}',
+
+    '#tvnav-diag{position:fixed;right:2vw;top:20vh;max-width:50vw;z-index:2147483580;display:none;pointer-events:none;',
+    'background:rgba(0,0,0,.88);color:#fff;font:400 2.5vh/1.4 Arial,Helvetica,sans-serif;padding:1.6vh 1.6vw;',
+    'border:3px solid #ffc400;border-radius:12px;word-wrap:break-word;}',
+    '#tvnav-diag b{color:#ffc400;}'
   ].join('');
 
   function buildUi() {
@@ -162,10 +167,12 @@
       '<div class="tv-info"><div class="tv-name"></div><div class="tv-prog"></div><div class="tv-bar"><i></i></div><div class="tv-time"></div></div>';
     ui.digits = document.createElement('div'); ui.digits.id = 'tvnav-digits';
     ui.toast = document.createElement('div'); ui.toast.id = 'tvnav-toast';
+    ui.diag = document.createElement('div'); ui.diag.id = 'tvnav-diag';
     document.body.appendChild(ui.ring);
     document.body.appendChild(ui.osd);
     document.body.appendChild(ui.digits);
     document.body.appendChild(ui.toast);
+    document.body.appendChild(ui.diag);
   }
 
   function toast(msg, ms) {
@@ -173,6 +180,112 @@
     ui.toast.style.display = 'block';
     clearTimeout(state.toastTimer);
     state.toastTimer = setTimeout(function () { ui.toast.style.display = 'none'; }, ms || 2500);
+  }
+
+  // ---------------------------------------------------------------- TEST: czy telewizor pozwala odtwarzać treści z DRM
+  // Wersja testowa: na stronie telewizji pokazuje w prawym górnym rogu, co telewizor odpowiada na pytania o DRM.
+  var diag = { probes: {}, order: [], calls: [], errors: [], encrypted: '', orig: null };
+  function dShort(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + '…' : s; }
+  function dErr(e) { return e ? ((e.name || 'Błąd') + (e.message ? ': ' + e.message : '')) : 'błąd'; }
+  function dMse(t) { try { return window.MediaSource && MediaSource.isTypeSupported(t) ? 'tak' : 'nie'; } catch (e) { return '?'; } }
+
+  function renderDiag() {
+    if (!ui.diag) return;
+    var h = '<b>TEST DRM</b> (tv-pilot ' + esc(window.__tvNav.version) + ')<br>';
+    diag.order.forEach(function (k) { h += esc(k) + ': ' + esc(diag.probes[k]) + '<br>'; });
+    h += 'MSE obraz: ' + dMse('video/mp4; codecs="avc1.640028"') + ', dźwięk: ' + dMse('audio/mp4; codecs="mp4a.40.2"') + '<br>';
+    h += 'tizen: ' + (typeof window.tizen) + ', webapis: ' + (typeof window.webapis) + '<br>';
+    if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
+    if (diag.calls.length) {
+      h += 'Strona pytała o DRM:<br>';
+      diag.calls.forEach(function (c) { h += '&nbsp;• ' + esc(c.ks) + ' → ' + esc(c.res) + '<br>'; });
+    }
+    diag.errors.forEach(function (s) { h += '! ' + esc(s) + '<br>'; });
+    h += '<span style="opacity:.7;font-size:2vh">' + esc(dShort(navigator.userAgent, 160)) + '</span>';
+    ui.diag.innerHTML = h;
+  }
+  function dNote(s) {
+    diag.errors.push(dShort(s, 120));
+    if (diag.errors.length > 4) diag.errors.shift();
+    renderDiag();
+  }
+
+  function probe(label, ks, cfg, withKeys) {
+    diag.order.push(label);
+    diag.probes[label] = '…';
+    var fn = diag.orig || navigator.requestMediaKeySystemAccess;
+    if (!fn) { diag.probes[label] = 'BRAK EME w przeglądarce'; renderDiag(); return; }
+    var p;
+    try { p = fn.call(navigator, ks, cfg); } catch (e) { diag.probes[label] = 'NIE: ' + dShort(dErr(e), 80); renderDiag(); return; }
+    p.then(function (access) {
+      diag.probes[label] = 'TAK';
+      renderDiag();
+      if (!withKeys) return;
+      access.createMediaKeys().then(function () {
+        diag.probes[label] = 'TAK (klucze też)';
+        renderDiag();
+      }, function (e) {
+        diag.probes[label] = 'TAK, ale klucze NIE: ' + dShort(dErr(e), 70);
+        renderDiag();
+      });
+    }, function (e) {
+      diag.probes[label] = 'NIE: ' + dShort(dErr(e), 80);
+      renderDiag();
+    });
+  }
+
+  function runProbes() {
+    var v = 'video/mp4; codecs="avc1.42E01E"', a = 'audio/mp4; codecs="mp4a.40.2"';
+    probe('Widevine', 'com.widevine.alpha', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: v }] }], true);
+    probe('Widevine (pełne)', 'com.widevine.alpha', [{
+      initDataTypes: ['cenc'],
+      audioCapabilities: [{ contentType: a, robustness: '' }],
+      videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.640028"', robustness: '' }],
+      distinctiveIdentifier: 'optional', persistentState: 'optional', sessionTypes: ['temporary']
+    }], false);
+    probe('PlayReady', 'com.microsoft.playready', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: v }] }], true);
+    probe('ClearKey', 'org.w3.clearkey', [{ initDataTypes: ['cenc', 'keyids'], videoCapabilities: [{ contentType: v }] }], false);
+  }
+
+  // zapisujemy, o jaki DRM pyta sama strona i co odpowiada telewizor
+  function watchDrm() {
+    var orig = navigator.requestMediaKeySystemAccess;
+    if (orig && !orig.__tvnav) {
+      diag.orig = orig;
+      var wrapped = function (ks) {
+        var rec = { ks: String(ks).replace('com.', '').replace('.alpha', ''), res: '…' };
+        diag.calls.push(rec);
+        if (diag.calls.length > 5) diag.calls.shift();
+        renderDiag();
+        var p = orig.apply(navigator, arguments);
+        if (p && p.then) p.then(function () { rec.res = 'TAK'; renderDiag(); }, function (e) { rec.res = 'NIE: ' + dShort(dErr(e), 60); renderDiag(); });
+        return p;
+      };
+      wrapped.__tvnav = true;
+      try { navigator.requestMediaKeySystemAccess = wrapped; } catch (e) { /* nie da się podmienić */ }
+    }
+    document.addEventListener('encrypted', function (e) { diag.encrypted = e.initDataType || '?'; renderDiag(); }, true);
+    document.addEventListener('error', function (e) {
+      var t = e.target;
+      if (t && t.tagName === 'VIDEO') dNote('Odtwarzacz: błąd ' + (t.error ? t.error.code + ' ' + (t.error.message || '') : ''));
+    }, true);
+    ['error', 'warn'].forEach(function (m) {
+      var o = console[m];
+      if (!o || o.__tvnav) return;
+      var w = function () {
+        try {
+          var s = Array.prototype.map.call(arguments, function (x) {
+            if (x && x.message) return x.message;
+            if (x && typeof x === 'object') { try { return JSON.stringify(x).slice(0, 200); } catch (er) { return String(x); } }
+            return String(x);
+          }).join(' ');
+          if (/drm|shaka|eme|key ?system|licen|widevine|decrypt|media/i.test(s)) dNote(s);
+        } catch (er) { /* ignorujemy */ }
+        return o.apply(console, arguments);
+      };
+      w.__tvnav = true;
+      console[m] = w;
+    });
   }
 
   // ---------------------------------------------------------------- kanały (lista na stronie /tv)
@@ -940,11 +1053,18 @@
     if (!state.full && !state.overlay && !isEditable(document.activeElement) && focusLost()) {
       if (!state.autoTimer) state.autoTimer = setTimeout(function () { state.autoTimer = null; autoFocus(); }, 900);
     }
+    if (ui.diag) {
+      var showDiag = isTvPage() ? 'block' : 'none';
+      if (ui.diag.style.display !== showDiag) ui.diag.style.display = showDiag;
+    }
   }
 
   function init() {
     if (!document.body) { document.addEventListener('DOMContentLoaded', init); return; }
     buildUi();
+    watchDrm();
+    renderDiag();
+    setTimeout(runProbes, 1500);
     new MutationObserver(function () { cache.dirty = true; }).observe(document.body, { childList: true, subtree: true });
     window.addEventListener('keydown', onKey, true);
     window.addEventListener('keypress', onKeyRest, true);
