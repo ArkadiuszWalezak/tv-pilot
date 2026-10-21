@@ -14,7 +14,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.0' };
+  window.__tvNav = { version: '1.0.1' };
 
   // ---------------------------------------------------------------- klawisze
   var K = {
@@ -49,6 +49,7 @@
   };
   var cache = { dirty: true, list: [] };
   var ui = {};
+  var swallowed = {}; // klawisze obsłużone przy keydown — ich keypress/keyup też zatrzymujemy
 
   // ---------------------------------------------------------------- narzędzia
   function load(k, d) { try { var v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } }
@@ -61,7 +62,26 @@
   }
   function path() { return location.pathname.replace(/\/+$/, '') || '/'; }
   function isTvPage() { return path() === '/tv'; }
-  function stop(e) { e.preventDefault(); e.stopPropagation(); if (e.stopImmediatePropagation) e.stopImmediatePropagation(); }
+  function stop(e) {
+    if (e.type === 'keydown') swallowed[e.keyCode] = true;
+    e.preventDefault(); e.stopPropagation(); if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+  }
+
+  // Telewizor potrafi sam „kliknąć” element, który ma systemowe zaznaczenie (np. checkbox po kliknięciu),
+  // nawet gdy żółta ramka jest już gdzie indziej. Dlatego:
+  //  - zdejmujemy systemowe zaznaczenie przy każdym ruchu ramki i po każdym kliknięciu,
+  //  - zatrzymujemy też keypress/keyup klawiszy, które obsłużyliśmy przy keydown.
+  function releaseNativeFocus(keep) {
+    var a = document.activeElement;
+    if (!a || a === document.body || a === document.documentElement) return;
+    if (keep && (a === keep || keep.contains(a))) return;
+    try { a.blur(); } catch (e) { /* ignorujemy */ }
+  }
+  function onKeyRest(e) {
+    if (!swallowed[e.keyCode]) return;
+    if (e.type === 'keyup') delete swallowed[e.keyCode];
+    e.preventDefault(); e.stopPropagation(); if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+  }
   function firstLine(el) { return ((el && el.innerText) || '').trim().split('\n')[0]; }
 
   function reactProps(el) {
@@ -639,8 +659,7 @@
 
   function focusEl(el, noReveal) {
     state.focus = el;
-    var a = document.activeElement;
-    if (isEditable(a) && a !== el && !el.contains(a)) a.blur();
+    releaseNativeFocus(el);
     if (!noReveal) reveal(el);
     var r = el.getBoundingClientRect();
     state.focusMemo = { text: firstLine(el), x: r.left + r.width / 2, y: r.top + r.height / 2 };
@@ -738,10 +757,21 @@
       var external = a.target === '_blank' || (/^(https?:)?\/\//i.test(href) && a.host !== location.host);
       if (external) { toast('Ten link prowadzi poza serwis – na telewizorze go pomijam'); return; }
     }
+    // checkbox/radio przełączamy bezpośrednio (nie przez etykietę), żeby nie dostał systemowego zaznaczenia
+    var box = (el.tagName === 'INPUT' && /^(checkbox|radio)$/i.test(el.type)) ? el : el.querySelector('input[type="checkbox"],input[type="radio"]');
+    if (box && !box.disabled) {
+      box.click();
+      cache.dirty = true;
+      releaseNativeFocus(null);
+      return;
+    }
     var p = reactProps(el);
     if (p && typeof p.onClick !== 'function' && typeof p.onMouseDown === 'function') { fire(el, 'mousedown'); fire(el, 'mouseup'); }
     el.click();
     cache.dirty = true;
+    // kliknięcie checkboxa (przez jego etykietę) daje mu systemowe zaznaczenie — od razu je zdejmujemy;
+    // pole tekstowe otwarte przez kliknięcie (np. wyszukiwarka) zostawiamy
+    if (!isEditable(document.activeElement)) releaseNativeFocus(null);
   }
 
   function closeModal() {
@@ -917,6 +947,8 @@
     buildUi();
     new MutationObserver(function () { cache.dirty = true; }).observe(document.body, { childList: true, subtree: true });
     window.addEventListener('keydown', onKey, true);
+    window.addEventListener('keypress', onKeyRest, true);
+    window.addEventListener('keyup', onKeyRest, true);
     window.requestAnimationFrame(ringLoop);
     state.session = hasSession();
     tick();
