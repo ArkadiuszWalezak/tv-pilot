@@ -14,7 +14,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.3-test' };
+  window.__tvNav = { version: '1.0.4-test' };
 
   // Przeglądarka aplikacji na telewizorze przedstawia się bez słowa „Chrome”, więc strona bierze ją za Safari
   // i wybiera zabezpieczenie Apple (FairPlay), którego telewizor nie ma. Dopisujemy „Chrome/wersja”,
@@ -163,8 +163,8 @@
     '#tvnav-list .tv-rname{font-size:2.9vh;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
     '#tvnav-list .tv-rprog{font-size:2.3vh;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:.4vh;}',
 
-    '#tvnav-diag{position:fixed;right:2vw;top:20vh;max-width:50vw;z-index:2147483580;display:none;pointer-events:none;',
-    'background:rgba(0,0,0,.88);color:#fff;font:400 2.5vh/1.4 Arial,Helvetica,sans-serif;padding:1.6vh 1.6vw;',
+    '#tvnav-diag{position:fixed;right:2vw;top:10vh;max-width:62vw;z-index:2147483580;display:none;pointer-events:none;',
+    'background:rgba(0,0,0,.88);color:#fff;font:400 2.3vh/1.35 Arial,Helvetica,sans-serif;padding:1.6vh 1.6vw;',
     'border:3px solid #ffc400;border-radius:12px;word-wrap:break-word;}',
     '#tvnav-diag b{color:#ffc400;}'
   ].join('');
@@ -198,31 +198,155 @@
 
   // ---------------------------------------------------------------- TEST: czy telewizor pozwala odtwarzać treści z DRM
   // Wersja testowa: na stronie telewizji pokazuje w prawym górnym rogu, co telewizor odpowiada na pytania o DRM.
-  var diag = { probes: {}, order: [], calls: [], errors: [], encrypted: '', orig: null };
+  var diag = { probes: {}, order: [], calls: [], mcap: {}, net: [], errors: [], encrypted: '', orig: null };
   function dShort(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + '…' : s; }
   function dErr(e) { return e ? ((e.name || 'Błąd') + (e.message ? ': ' + e.message : '')) : 'błąd'; }
-  function dMse(t) { try { return window.MediaSource && MediaSource.isTypeSupported(t) ? 'tak' : 'nie'; } catch (e) { return '?'; } }
+  function dFlat(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); }
 
   function renderDiag() {
     if (!ui.diag) return;
     var h = '<b>TEST DRM</b> (tv-pilot ' + esc(window.__tvNav.version) + ')<br>';
-    diag.order.forEach(function (k) { h += esc(k) + ': ' + esc(diag.probes[k]) + '<br>'; });
-    h += 'MSE obraz: ' + dMse('video/mp4; codecs="avc1.640028"') + ', dźwięk: ' + dMse('audio/mp4; codecs="mp4a.40.2"') + '<br>';
-    h += 'tizen: ' + (typeof window.tizen) + ', webapis: ' + (typeof window.webapis) + '<br>';
+    h += 'Telewizor: ' + diag.order.map(function (k) { return esc(k) + ' ' + esc(diag.probes[k]); }).join(' · ') + '<br>';
     if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
-    if (diag.calls.length) {
-      h += 'Strona pytała o DRM:<br>';
-      diag.calls.forEach(function (c) { h += '&nbsp;• ' + esc(c.ks) + ' → ' + esc(c.res) + '<br>'; });
+    var asked = Object.keys(diag.mcap).map(function (k) { return esc(k) + ' → ' + esc(diag.mcap[k]); });
+    diag.calls.forEach(function (c) { asked.push(esc(c.ks) + ' → ' + esc(c.res)); });
+    if (asked.length) h += 'Strona pytała o DRM: ' + asked.join(' · ') + '<br>';
+    if (diag.net.length) {
+      h += 'Sieć:<br>';
+      diag.net.forEach(function (s) { h += '&nbsp;• ' + esc(s) + '<br>'; });
     }
     diag.errors.forEach(function (s) { h += '! ' + esc(s) + '<br>'; });
-    h += '<span style="opacity:.7;font-size:2vh">' + esc(dShort(navigator.userAgent, 160)) + '</span>';
+    h += '<span style="opacity:.7;font-size:1.9vh">' + esc(dShort(navigator.userAgent, 160)) + '</span>';
     ui.diag.innerHTML = h;
   }
   function dNote(s) {
-    diag.errors.push(dShort(s, 120));
-    if (diag.errors.length > 4) diag.errors.shift();
+    s = dShort(dFlat(s), 170);
+    if (diag.errors.indexOf(s) >= 0) return;
+    diag.errors.push(s);
+    if (diag.errors.length > 5) diag.errors.shift();
     renderDiag();
   }
+  function netNote(s) {
+    diag.net.push(dShort(dFlat(s), 170));
+    if (diag.net.length > 6) diag.net.shift();
+    renderDiag();
+  }
+
+  // opis błędu odtwarzacza Shaka razem z przyczyną (np. odpowiedź serwera licencji)
+  function shakaErr(e) {
+    var s = 'Shaka ' + e.code;
+    var d = e.data || [];
+    var inner = d[0];
+    if (inner && typeof inner.code === 'number') {
+      var id = inner.data || [];
+      s += ' ← ' + inner.code;
+      if (inner.code === 1001) s += ' HTTP ' + id[1] + ' ' + dShort(dFlat(id[2]), 90);
+      else if (inner.code === 1002) s += ' błąd sieci: ' + dShort(dErr(id[1]), 70);
+      else if (inner.code === 1003) s += ' brak odpowiedzi (czas minął)';
+      else if (id.length) { try { s += ' ' + dShort(JSON.stringify(id), 80); } catch (er) { /* pomijamy */ } }
+    } else if (d.length) {
+      try { s += ' ' + dShort(JSON.stringify(d), 90); } catch (er) { /* pomijamy */ }
+    }
+    return s;
+  }
+
+  // adres bez parametrów (mogą w nich być tokeny) — sam serwer i ścieżka
+  function netTag(url, method, body) {
+    url = String(url || '');
+    method = String(method || 'GET').toUpperCase();
+    var bin = body && typeof body !== 'string' && !(window.URLSearchParams && body instanceof URLSearchParams) &&
+      !(window.FormData && body instanceof FormData);
+    if (!(/cid=|licen|drm|widevine|preauth/i.test(url) || (method === 'POST' && bin))) return '';
+    var host = url, p = url.split('?')[0];
+    try { var u = new URL(url, location.href); host = u.host; p = u.pathname; } catch (e) { host = ''; }
+    return method + ' ' + host + dShort(p, 45) + (/cid=/.test(url) ? ' (przed licencją)' : '');
+  }
+  function bodySnippet(text) { return text ? ' ' + dShort(dFlat(text), 90) : ''; }
+  function headerSnippet(get) {
+    var out = [];
+    ['x-error', 'x-error-message', 'x-reason', 'x-dt-error', 'x-axdrm-errormessage', 'x-drm-error', 'www-authenticate'].forEach(function (k) {
+      var v = get(k);
+      if (v) out.push(k + '=' + dShort(v, 50));
+    });
+    return out.length ? ' [' + out.join(', ') + ']' : '';
+  }
+
+  function watchNet() {
+    var of = window.fetch;
+    if (of && !of.__tvnav) {
+      var wf = function (input, init) {
+        var url = typeof input === 'string' ? input : (input && input.url) || '';
+        var method = (init && init.method) || (input && typeof input === 'object' && input.method) || 'GET';
+        var tag = '';
+        try { tag = netTag(url, method, init && init.body); } catch (e) { tag = ''; }
+        var p = of.apply(window, arguments);
+        if (tag) {
+          p.then(function (res) {
+            var line = tag + ' → ' + res.status;
+            var hs = headerSnippet(function (k) { try { return res.headers.get(k); } catch (e) { return null; } });
+            if (res.ok) { netNote(line + ' OK' + hs); return; }
+            try {
+              res.clone().text().then(function (t) { netNote(line + hs + bodySnippet(t)); }, function () { netNote(line + hs); });
+            } catch (e) { netNote(line + hs); }
+          }, function (e) { netNote(tag + ' → BŁĄD SIECI: ' + dShort(dErr(e), 60)); });
+        }
+        return p;
+      };
+      wf.__tvnav = true;
+      try { window.fetch = wf; } catch (e) { /* nie da się podmienić */ }
+    }
+    var X = window.XMLHttpRequest && XMLHttpRequest.prototype;
+    if (X && !X.open.__tvnav) {
+      var xo = X.open, xs = X.send;
+      X.open = function (m, u) { this.__tvm = m; this.__tvu = u; return xo.apply(this, arguments); };
+      X.open.__tvnav = true;
+      X.send = function (body) {
+        var x = this, tag = '';
+        try { tag = netTag(x.__tvu, x.__tvm, body); } catch (e) { tag = ''; }
+        if (tag) {
+          x.addEventListener('loadend', function () {
+            if (!x.status) { netNote(tag + ' → BŁĄD SIECI (brak odpowiedzi)'); return; }
+            var hs = headerSnippet(function (k) { try { return x.getResponseHeader(k); } catch (e) { return null; } });
+            var t = '';
+            try {
+              if (!x.responseType || x.responseType === 'text') t = x.responseText;
+              else if (x.responseType === 'arraybuffer' && x.response && window.TextDecoder) t = new TextDecoder().decode(new Uint8Array(x.response).subarray(0, 300));
+            } catch (e) { t = ''; }
+            netNote(tag + ' → ' + x.status + (x.status < 400 ? ' OK' + hs : hs + bodySnippet(t)));
+          });
+        }
+        return xs.apply(this, arguments);
+      };
+    }
+  }
+
+  // Shaka pyta o DRM przez mediaCapabilities.decodingInfo — zapisujemy, o jaki system pyta i co słyszy
+  function watchMcap() {
+    var mc = navigator.mediaCapabilities;
+    if (!mc || !mc.decodingInfo || mc.decodingInfo.__tvnav) return;
+    var od = mc.decodingInfo;
+    var w = function (cfg) {
+      var p = od.apply(mc, arguments);
+      var ks = cfg && cfg.keySystemConfiguration && cfg.keySystemConfiguration.keySystem;
+      if (ks && p && p.then) {
+        var name = String(ks).replace('com.', '').replace('.alpha', '');
+        p.then(function (r) {
+          if (r && r.supported) diag.mcap[name] = 'TAK';
+          else if (diag.mcap[name] !== 'TAK') diag.mcap[name] = 'NIE';
+          renderDiag();
+        }, function (e) {
+          if (diag.mcap[name] !== 'TAK') diag.mcap[name] = 'NIE: ' + dShort(dErr(e), 40);
+          renderDiag();
+        });
+      }
+      return p;
+    };
+    w.__tvnav = true;
+    try { mc.decodingInfo = w; } catch (e) { /* nie da się podmienić */ }
+  }
+  // od razu, zanim strona zacznie odtwarzać (nie czekamy na zbudowanie strony)
+  try { watchNet(); } catch (e) { /* bez zapisu sieci */ }
+  try { watchMcap(); } catch (e) { /* bez zapisu pytań o DRM */ }
 
   function probe(label, ks, cfg, withKeys) {
     diag.order.push(label);
@@ -310,11 +434,13 @@
       var w = function () {
         try {
           var s = Array.prototype.map.call(arguments, function (x) {
+            if (x && typeof x === 'object' && typeof x.code === 'number' && x.data && x.data.length !== undefined) return shakaErr(x);
+            if (x && x.detail && typeof x.detail.code === 'number' && x.detail.data) return shakaErr(x.detail);
             if (x && x.message) return x.message;
             if (x && typeof x === 'object') { try { return JSON.stringify(x).slice(0, 200); } catch (er) { return String(x); } }
             return String(x);
           }).join(' ');
-          if (/drm|shaka|eme|key ?system|licen|widevine|decrypt|media/i.test(s)) dNote(s);
+          if (/drm|shaka|eme|key ?system|licen|widevine|decrypt|media|error code/i.test(s)) dNote(s);
         } catch (er) { /* ignorujemy */ }
         return o.apply(console, arguments);
       };
