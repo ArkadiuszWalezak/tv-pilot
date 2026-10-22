@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.19-test' };
+  window.__tvNav = { version: '1.0.20' };
 
   // Wbudowana przeglądarka telewizora odtwarza zaszyfrowane kanały, a aplikacja nie. Dajemy aplikacji
   // dokładnie ten sam opis (User-Agent) co przeglądarka — w ustawieniach TizenBrew, które obowiązują w całej
@@ -255,6 +255,7 @@
     '#tvnav-list .tv-rows{flex:1;overflow:hidden;position:relative;}',
     '#tvnav-list .tv-row{display:flex;align-items:center;height:9vh;padding:0 2vw;border-left:6px solid transparent;}',
     '#tvnav-list .tv-row.on{background:rgba(255,196,0,.2);border-left-color:#ffc400;}',
+    '#tvnav-list .tv-row.enc{opacity:.4;}',
     '#tvnav-list .tv-row.cur .tv-rn{color:#ffc400;}',
     '#tvnav-list .tv-rn{width:5vw;font-size:3vh;font-weight:700;}',
     '#tvnav-list .tv-rl{width:7vw;height:6vh;margin-right:1.2vw;display:flex;align-items:center;justify-content:center;}',
@@ -299,6 +300,35 @@
   // ---------------------------------------------------------------- TEST: czy telewizor pozwala odtwarzać treści z DRM
   // Wersja testowa: na stronie telewizji pokazuje w prawym górnym rogu, co telewizor odpowiada na pytania o DRM.
   var diag = { probes: {}, order: [], calls: [], mcap: {}, net: [], errors: [], encrypted: '', orig: null };
+  // panel diagnostyczny tylko na życzenie: localStorage 'tvnav:diag' = 1
+  var DIAG_ON = load('tvnav:diag', 0) === 1;
+  // blokada odtwarzania z DRM (wyłączenie: localStorage 'tvnav:drm' = 1)
+  var BLOCK_DRM = load('tvnav:drm', 0) !== 1;
+
+  // ---------------------------------------------------------------- kanały zaszyfrowane
+  // Ten telewizor nie odtwarza w aplikacjach zaszyfrowanego dźwięku (cbcs), a próba potrafi zawiesić dekoder
+  // aż do restartu. Dlatego zaszyfrowanych kanałów w ogóle nie uruchamiamy — działają w przeglądarce telewizora.
+  var ENC_MSG = 'Ten kanał jest zaszyfrowany — na tym telewizorze działa tylko w przeglądarce telewizora';
+  var enc = { nums: load('tvnav:encnums', {}), names: load('tvnav:encnames', {}) };
+  function normName(n) { return String(n || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+  function noteChannelList(list) {
+    var nums = {}, names = {}, k = 0;
+    for (var i = 0; i < list.length; i++) {
+      var c = list[i];
+      if (!c || !c.drm) continue; // 0 / brak = bez szyfrowania
+      if (c.lcn !== undefined && c.lcn !== null) nums[c.lcn] = 1;
+      if (c.name) names[normName(c.name)] = 1;
+      k++;
+    }
+    enc.nums = nums; enc.names = names;
+    save('tvnav:encnums', nums); save('tvnav:encnames', names);
+    diag.chEnc = k;
+  }
+  function isEncrypted(ch) {
+    if (!ch) return false;
+    if (enc.nums[ch.num]) return true;
+    return !!enc.names[normName(ch.name)];
+  }
   function dShort(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + '…' : s; }
   function dErr(e) { return e ? ((e.name || 'Błąd') + (e.message ? ': ' + e.message : '')) : 'błąd'; }
   function dFlat(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); }
@@ -312,6 +342,7 @@
     if (uaInfo.start) h += 'Strona startowa TizenBrew: ' + esc(uaInfo.start) + '<br>';
     if (diag.platform && PLATFORM) h += 'Platforma dla serwera: ' + esc(diag.platform) + ' → ' + esc(PLATFORM) + '<br>';
     if (diag.mpd) h += 'Strumień kanału: ' + esc(diag.mpd) + '<br>';
+    if (diag.chEnc !== undefined) h += 'Kanały zaszyfrowane: ' + diag.chEnc + (BLOCK_DRM ? ' (zablokowane)' : '') + '<br>';
     if (diag.chTotal !== undefined) h += 'Lista kanałów: ' + diag.chFixed + ' z ' + diag.chTotal + ' przepisane z Apple na Widevine' + (diag.origPl ? ' (pl=' + esc(diag.origPl) + ')' : '') + '<br>';
     if (diag.pbFixed) h += 'Odtwarzanie: przepisane z Apple na Widevine (' + diag.pbFixed + ')<br>';
     if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
@@ -464,6 +495,7 @@
       if (!list || !list.length) return res;
       var n = 0;
       for (var i = 0; i < list.length; i++) if (toWidevine(list[i])) n++;
+      try { noteChannelList(list); } catch (e) { /* bez listy */ }
       diag.chTotal = list.length;
       diag.chFixed = n;
       renderDiag();
@@ -750,6 +782,12 @@
     if (orig && !orig.__tvnav) {
       diag.orig = orig;
       var wrapped = function (ks, cfgs) {
+        if (BLOCK_DRM && /widevine|playready/i.test(String(ks))) {
+          toast(ENC_MSG, 5000);
+          var er;
+          try { er = new DOMException(ENC_MSG, 'NotSupportedError'); } catch (e) { er = new Error(ENC_MSG); er.name = 'NotSupportedError'; }
+          return Promise.reject(er);
+        }
         var rec = { ks: String(ks).replace('com.', '').replace('.alpha', ''), res: '…' };
         diag.calls.push(rec);
         if (diag.calls.length > 5) diag.calls.shift();
@@ -909,6 +947,7 @@
     var chs = getChannels();
     var ch = findCh(chs, num);
     if (!ch) { toast('Nie ma kanału o numerze ' + num); return false; }
+    if (BLOCK_DRM && isEncrypted(ch)) { showOsd(ch, 3000); toast(ENC_MSG, 4000); return false; }
     var sel = selectedChannel(chs);
     if (state.current !== null && state.current !== num) state.previous = state.current;
     state.current = num;
@@ -929,7 +968,12 @@
     var idx = -1;
     for (var i = 0; i < chs.length; i++) if (chs[i].num === base) { idx = i; break; }
     if (idx < 0) { var s = selectedChannel(chs); idx = s ? chs.indexOf(s) : 0; }
-    var next = chs[(idx + dir + chs.length) % chs.length];
+    var next = null;
+    for (var s2 = 1; s2 <= chs.length; s2++) {
+      var cand = chs[(idx + dir * s2 + chs.length * s2) % chs.length];
+      if (!BLOCK_DRM || !isEncrypted(cand)) { next = cand; break; }
+    }
+    if (!next) { toast('Brak kanałów, które działają w aplikacji'); return; }
     state.zapTarget = next.num;
     showOsd(next);
     clearTimeout(state.zapTimer);
@@ -1003,7 +1047,7 @@
       '<div class="tv-rows">';
     for (var i = 0; i < chs.length; i++) {
       var c = chs[i];
-      h += '<div class="tv-row' + (c.num === state.current ? ' cur' : '') + '">' +
+      h += '<div class="tv-row' + (c.num === state.current ? ' cur' : '') + (BLOCK_DRM && isEncrypted(c) ? ' enc' : '') + '">' +
         '<div class="tv-rn">' + c.num + '</div>' +
         '<div class="tv-rl">' + (c.logo ? '<img alt="" src="' + esc(c.logo) + '">' : '') + '</div>' +
         '<div class="tv-rt"><div class="tv-rname">' + esc(c.name) + '</div>' +
@@ -1084,8 +1128,13 @@
       if (!chs.length || !isTvPage()) return;
       var sel = selectedChannel(chs);
       var want = pendingNum || (first ? load('tvnav:last', null) : null);
-      if (want && findCh(chs, want) && (!sel || sel.num !== want)) { tune(want); return; }
+      if (want && findCh(chs, want) && (!sel || sel.num !== want) && !(BLOCK_DRM && isEncrypted(findCh(chs, want)))) { tune(want); return; }
       var ch = sel || chs[0];
+      if (BLOCK_DRM && isEncrypted(ch)) {
+        var ok = null;
+        for (var q = 0; q < chs.length; q++) if (!isEncrypted(chs[q])) { ok = chs[q]; break; }
+        if (ok) { tune(ok.num); return; }
+      }
       if (state.current !== null && state.current !== ch.num) state.previous = state.current;
       state.current = ch.num;
       save('tvnav:last', ch.num);
@@ -1574,7 +1623,7 @@
       if (!state.autoTimer) state.autoTimer = setTimeout(function () { state.autoTimer = null; autoFocus(); }, 900);
     }
     if (ui.diag) {
-      var showDiag = isTvPage() ? 'block' : 'none';
+      var showDiag = isTvPage() && DIAG_ON ? 'block' : 'none';
       if (ui.diag.style.display !== showDiag) ui.diag.style.display = showDiag;
     }
   }
@@ -1837,7 +1886,7 @@
     buildUi();
     watchDrm();
     renderDiag();
-    setTimeout(runProbes, 1500);
+    if (DIAG_ON) setTimeout(runProbes, 1500);
     new MutationObserver(function () { cache.dirty = true; }).observe(document.body, { childList: true, subtree: true });
     window.addEventListener('keydown', onKey, true);
     window.addEventListener('keypress', onKeyRest, true);
