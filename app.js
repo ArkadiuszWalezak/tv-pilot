@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.14-test' };
+  window.__tvNav = { version: '1.0.15-test' };
   // strona testu odtwarzania: zatrzymujemy wczytywanie serwisu, żeby nic innego nie odtwarzało obrazu
   if (location.pathname === '/tvnav-test') { try { window.stop(); } catch (e) { /* trudno */ } }
 
@@ -217,7 +217,7 @@
     if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
     if (diag.keys) h += 'Klucze po licencji: ' + esc(diag.keys) + '<br>';
     if (diag.play) h += 'Obraz kanału: ' + esc(diag.play) + '<br>';
-    if (diag.noAudio) h += 'Próba bez dźwięku: ' + esc(diag.noAudio) + '<br>';
+    if (typeof AX !== 'undefined' && AX) h += axLine();
     var wv = null;
     try { wv = JSON.parse(localStorage.getItem('tvnav:wvres') || 'null'); } catch (e) { wv = null; }
     if (wv && wv.length) {
@@ -539,6 +539,7 @@
     if (!mc || !mc.decodingInfo || mc.decodingInfo.__tvnav) return;
     var od = mc.decodingInfo;
     var w = function (cfg) {
+      try { axPatchMcap(cfg); } catch (e) { /* bez zmian */ }
       var p = od.apply(mc, arguments);
       var ks = cfg && cfg.keySystemConfiguration && cfg.keySystemConfiguration.keySystem;
       if (ks && p && p.then) {
@@ -639,7 +640,9 @@
         diag.calls.push(rec);
         if (diag.calls.length > 5) diag.calls.shift();
         renderDiag();
-        var p = orig.apply(navigator, arguments);
+        var use = cfgs;
+        try { use = axPatchCfgs(ks, cfgs); } catch (e) { use = cfgs; }
+        var p = use === cfgs ? orig.apply(navigator, arguments) : orig.call(navigator, ks, use);
         // gdy telewizor odmówi tylko z powodu „trwałego stanu”, pytamy jeszcze raz bez tego wymogu
         if (p && p.then && /widevine|playready/i.test(String(ks)) && cfgs && cfgs.length) {
           p = p.then(null, function (err) {
@@ -666,6 +669,7 @@
     document.addEventListener('error', function (e) {
       var t = e.target;
       if (t && t.tagName === 'VIDEO') {
+        if (t.error && t.error.code === 3) axDecodeError();
         dNote('Odtwarzacz: błąd ' + (t.error ? t.error.code + ' ' + (t.error.message || '') : ''));
       }
     }, true);
@@ -1461,6 +1465,87 @@
     }
   }
 
+  // ---------------------------------------------------------------- TEST: tryby odszyfrowania obrazu i dźwięku
+  // Kanały mają szyfrowanie „cbcs”. Z dźwiękiem obraz stoi, bez dźwięku rusza na chwilę. Sprawdzamy po kolei
+  // zestawy trybów Widevine dla obrazu i dźwięku. Gdy kanał stoi — zapisujemy wynik i przeładowujemy stronę z
+  // następnym zestawem. Po błędzie dekodera trzeba zrestartować telewizor (dekoder się zawiesza).
+  var AX = [
+    { v: null, a: 'SW_SECURE_CRYPTO' },
+    { v: null, a: 'SW_SECURE_DECODE' },
+    { v: 'HW_SECURE_ALL', a: 'SW_SECURE_CRYPTO' },
+    { v: 'HW_SECURE_DECODE', a: 'SW_SECURE_DECODE' },
+    { v: 'SW_SECURE_DECODE', a: 'SW_SECURE_DECODE' },
+    { v: 'SW_SECURE_CRYPTO', a: 'SW_SECURE_CRYPTO' }
+  ];
+  var ax = { i: 0, res: [], ok: -1, restart: false };
+  try {
+    var axs = JSON.parse(localStorage.getItem('tvnav:ax') || 'null');
+    if (axs && axs.res) ax = { i: axs.i || 0, res: axs.res, ok: axs.ok === undefined ? -1 : axs.ok, restart: false };
+  } catch (e) { /* od początku */ }
+  var axRun = { keysAt: 0, t0: 0, done: false };
+  function axSave() { try { localStorage.setItem('tvnav:ax', JSON.stringify({ i: ax.i, res: ax.res, ok: ax.ok })); } catch (e) { /* trudno */ } }
+  function axActive() { return ax.ok < 0 && ax.i < AX.length; }
+  function axCombo() { return ax.ok >= 0 ? AX[ax.ok] : (axActive() ? AX[ax.i] : null); }
+  function axName(c) { return (c.v ? c.v.replace('_SECURE_', ' ') : 'domyślny') + ' / ' + c.a.replace('_SECURE_', ' '); }
+  function axPatchMcap(cfg) {
+    var c = axCombo(), k = cfg && cfg.keySystemConfiguration;
+    if (!c || !k || !/widevine/i.test(String(k.keySystem))) return;
+    if (c.v && (k.video || cfg.video)) { if (!k.video) k.video = {}; k.video.robustness = c.v; }
+    if (c.a && (k.audio || cfg.audio)) { if (!k.audio) k.audio = {}; k.audio.robustness = c.a; }
+  }
+  function axPatchCfgs(ks, cfgs) {
+    var c = axCombo();
+    if (!c || !/widevine/i.test(String(ks)) || !cfgs || !cfgs.length) return cfgs;
+    var out = [];
+    for (var i = 0; i < cfgs.length; i++) {
+      var o = {}, src = cfgs[i], k;
+      for (k in src) o[k] = src[k];
+      ['videoCapabilities', 'audioCapabilities'].forEach(function (key) {
+        var r = key === 'videoCapabilities' ? c.v : c.a;
+        if (!r || !src[key]) return;
+        o[key] = src[key].map(function (cap) { var n = {}, m; for (m in cap) n[m] = cap[m]; n.robustness = r; return n; });
+      });
+      out.push(o);
+    }
+    return out;
+  }
+  function axFinish(result, reload) {
+    if (!axActive() || axRun.done) return;
+    axRun.done = true;
+    ax.res[ax.i] = result;
+    if (result === 'DZIAŁA') ax.ok = ax.i; else ax.i++;
+    axSave();
+    renderDiag();
+    if (reload && axActive()) setTimeout(function () { location.reload(); }, 3000);
+  }
+  function axDecodeError() {
+    if (!axActive() || axRun.done || !axRun.keysAt) return;
+    ax.restart = true;
+    axFinish('błąd 3 (dekoder)', false);
+  }
+  // wywoływane co sekundę przez podgląd odtwarzania
+  function axTick(v, t) {
+    if (!axActive() || axRun.done) return;
+    if (!axRun.keysAt) {
+      if (diag.keys && diag.keys.indexOf('usable') >= 0) { axRun.keysAt = Date.now(); axRun.t0 = t; }
+      return;
+    }
+    if (t - axRun.t0 > 25 && v.videoWidth > 0 && !v.error) { axFinish('DZIAŁA', false); return; }
+    if (Date.now() - axRun.keysAt > 50000) axFinish('stoi (+' + (t - axRun.t0).toFixed(1) + ' s)', true);
+  }
+  function axLine() {
+    var h = 'Tryby obraz / dźwięk: ';
+    h += AX.map(function (c, i) {
+      var st = ax.res[i] || (axActive() && i === ax.i ? 'sprawdzam…' : '–');
+      return (i + 1) + ') ' + esc(axName(c)) + ': ' + esc(st);
+    }).join(' · ');
+    if (ax.ok >= 0) h += ' → <b>używam ' + (ax.ok + 1) + '</b>';
+    else if (!axActive()) h += ' → żaden nie zadziałał';
+    h += '<br>';
+    if (ax.restart && axActive()) h += '<b style="color:#ffc400">Dekoder się zawiesił — uruchom ponownie telewizor (przytrzymaj zasilanie), potem otwórz Telewizję: test pójdzie dalej.</b><br>';
+    return h;
+  }
+
   // ---------------------------------------------------------------- TEST: stan odtwarzacza strony i próba bez dźwięku
   // Pokazuje, co się dzieje z obrazem kanału (czas, bufory obrazu i dźwięku, klatki). Jeśli 20 s po licencji
   // obraz stoi, wczytuje kanał jeszcze raz bez dźwięku — żeby sprawdzić, czy to dźwięk blokuje odtwarzanie.
@@ -1490,25 +1575,7 @@
       (p ? '' : ', brak dostępu do odtwarzacza');
     if (diag.keys && diag.keys.indexOf('usable') >= 0 && !pbw.keysAt) { pbw.keysAt = Date.now(); pbw.t0 = t; }
     if (pbw.keysAt) diag.play = 'czas +' + (t - pbw.t0).toFixed(1) + ' s, ' + diag.play;
-    if (p && pbw.keysAt && !pbw.tried && Date.now() - pbw.keysAt > 20000 && t - pbw.t0 < 1) {
-      pbw.tried = true;
-      pbw.triedAt = Date.now();
-      diag.noAudio = 'wczytuję kanał bez dźwięku…';
-      try {
-        p.configure({ manifest: { disableAudio: true } });
-        p.load(p.getAssetUri()).then(function () {
-          pbw.tAtTry = v.currentTime || 0;
-          try { var pr = v.play(); if (pr && pr['catch']) pr['catch'](function () { /* trudno */ }); } catch (e) { /* trudno */ }
-        }, function (e) { diag.noAudio = 'nie udało się: ' + (e && typeof e.code === 'number' ? shakaErr(e) : dErr(e)); });
-      } catch (e) { diag.noAudio = 'nie udało się: ' + dErr(e); }
-    }
-    if (pbw.tried && /wczytuję/.test(diag.noAudio || '') && Date.now() - pbw.triedAt > 15000) {
-      if (pbw.tAtTry === null) diag.noAudio = 'kanał się nie wczytał';
-      else {
-        var adv = (v.currentTime || 0) - pbw.tAtTry;
-        diag.noAudio = adv > 3 ? 'OBRAZ RUSZYŁ (+' + adv.toFixed(1) + ' s) — blokuje dźwięk' : 'obraz nadal stoi (+' + adv.toFixed(1) + ' s)';
-      }
-    }
+    axTick(v, t);
     renderDiag();
   }
 
@@ -1647,14 +1714,6 @@
     }
     if (!document.body) { document.addEventListener('DOMContentLoaded', init); return; }
     try { ['tvnav:robi', 'tvnav:robres', 'tvnav:robok'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { /* trudno */ }
-    // jednorazowo: po zalogowaniu przejdź do testu odtwarzania
-    try {
-      if (hasSession() && localStorage.getItem('tvnav:wvtest') !== '5') {
-        localStorage.setItem('tvnav:wvtest', '5');
-        location.replace(TEST_PATH);
-        return;
-      }
-    } catch (e) { /* bez testu */ }
     buildUi();
     watchDrm();
     renderDiag();
