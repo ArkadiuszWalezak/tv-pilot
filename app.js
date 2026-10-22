@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.17-test' };
+  window.__tvNav = { version: '1.0.18-test' };
 
   // Wbudowana przeglądarka telewizora odtwarza zaszyfrowane kanały, a aplikacja nie. Dajemy aplikacji
   // dokładnie ten sam opis (User-Agent) co przeglądarka — w ustawieniach TizenBrew, które obowiązują w całej
@@ -42,12 +42,31 @@
     } catch (e) { /* zostaje dotychczasowy opis */ }
     return;
   }
+  var uaInfo = { action: '', hist: history.length, tz: typeof tizen, ws: 'nie' };
+  try { if (typeof tizen !== 'undefined' && tizen.websetting && tizen.websetting.setUserAgentString) uaInfo.ws = 'tak'; } catch (e) { /* brak */ }
   (function switchToBrowserUa() {
-    if (IS_SB || !samsungBrowserUa(REAL_UA) || history.length < 2) return;
+    if (IS_SB) { uaInfo.action = 'gotowe'; return; }
+    var sbUa = samsungBrowserUa(REAL_UA);
+    if (!sbUa) { uaInfo.action = 'nieznana wersja telewizora'; return; }
     var last = 0;
-    try { last = Number(localStorage.getItem('tvnav:uaswitch') || 0); } catch (e) { last = 0; }
-    if (Date.now() - last < 10 * 60 * 1000) return; // najwyżej raz na 10 minut — bez zapętlenia
-    try { localStorage.setItem('tvnav:uaswitch', String(Date.now())); } catch (e) { return; }
+    try { last = Number(localStorage.getItem('tvnav:uaswitch2') || 0); } catch (e) { last = 0; }
+    var ago = Math.round((Date.now() - last) / 1000);
+    // 1) gdy strona ma dostęp do ustawień aplikacji — zmieniamy opis od razu i wczytujemy stronę ponownie
+    if (uaInfo.ws === 'tak') {
+      if (ago < 120) { uaInfo.action = 'ustawiony ' + ago + ' s temu, ale opis się nie zmienił'; return; }
+      try { localStorage.setItem('tvnav:uaswitch2', String(Date.now())); } catch (e) { return; }
+      uaInfo.action = 'ustawiam';
+      try {
+        tizen.websetting.setUserAgentString(sbUa, function () { location.replace(location.href); },
+          function (er) { uaInfo.action = 'błąd: ' + ((er && er.message) || er); });
+      } catch (e) { uaInfo.action = 'błąd: ' + e.message; }
+      return;
+    }
+    // 2) inaczej przez stronę startową TizenBrew (tam ustawienia są dostępne)
+    if (history.length < 2) { uaInfo.action = 'brak strony startowej w historii'; return; }
+    if (ago < 10 * 60) { uaInfo.action = 'próba przez stronę startową była ' + ago + ' s temu i nie zadziałała'; return; }
+    try { localStorage.setItem('tvnav:uaswitch2', String(Date.now())); } catch (e) { return; }
+    uaInfo.action = 'wracam na stronę startową TizenBrew';
     var note = function () {
       if (!document.body) { setTimeout(note, 100); return; }
       var d = document.createElement('div');
@@ -257,7 +276,8 @@
     if (!ui.diag) return;
     var h = '<b>TEST DRM</b> (tv-pilot ' + esc(window.__tvNav.version) + (window.__tvNavFrom ? ', ' + esc(window.__tvNavFrom) : '') + ')<br>';
     h += 'Telewizor: ' + diag.order.map(function (k) { return esc(k) + ' ' + esc(diag.probes[k]); }).join(' · ') + '<br>';
-    h += 'Opis aplikacji: ' + (IS_SB ? 'jak wbudowana przeglądarka telewizora' : 'TizenBrew (przełączam na opis przeglądarki)') + '<br>';
+    h += 'Opis aplikacji: ' + (IS_SB ? 'jak wbudowana przeglądarka telewizora' : 'TizenBrew — ' + esc(uaInfo.action) +
+      ' (historia ' + uaInfo.hist + ', tizen: ' + esc(uaInfo.tz) + ', ustawienia: ' + uaInfo.ws + ')') + '<br>';
     if (diag.platform && PLATFORM) h += 'Platforma dla serwera: ' + esc(diag.platform) + ' → ' + esc(PLATFORM) + '<br>';
     if (diag.mpd) h += 'Strumień kanału: ' + esc(diag.mpd) + '<br>';
     if (diag.chTotal !== undefined) h += 'Lista kanałów: ' + diag.chFixed + ' z ' + diag.chTotal + ' przepisane z Apple na Widevine' + (diag.origPl ? ' (pl=' + esc(diag.origPl) + ')' : '') + '<br>';
