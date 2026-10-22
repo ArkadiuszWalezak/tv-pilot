@@ -7,7 +7,9 @@
 (function () {
   'use strict';
   if (window.__tvNavLoader) return;
-  if (!/^https?:$/.test(location.protocol)) return;
+  // także na stronie startowej TizenBrew (plik w telewizorze) — dodatek ustawia tam opis przeglądarki
+  var tbStart = location.protocol === 'file:' && /tizenbrew-ui/.test(location.pathname);
+  if (!/^https?:$/.test(location.protocol) && !tbStart) return;
   try { if (window.top !== window) return; } catch (e) { return; }
   window.__tvNavLoader = true;
 
