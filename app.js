@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.6-test' };
+  window.__tvNav = { version: '1.0.7-test' };
 
   // Przeglądarka aplikacji na telewizorze przedstawia się bez słowa „Chrome”, więc strona bierze ją za Safari
   // i wybiera zabezpieczenie Apple (FairPlay), którego telewizor nie ma. Dopisujemy „Chrome/wersja”,
@@ -209,6 +209,8 @@
     var h = '<b>TEST DRM</b> (tv-pilot ' + esc(window.__tvNav.version) + (window.__tvNavFrom ? ', ' + esc(window.__tvNavFrom) : '') + ')<br>';
     h += 'Telewizor: ' + diag.order.map(function (k) { return esc(k) + ' ' + esc(diag.probes[k]); }).join(' · ') + '<br>';
     if (diag.platform) h += 'Platforma dla serwera: ' + esc(diag.platform) + ' → ' + esc(PLATFORM) + '<br>';
+    if (diag.chTotal !== undefined) h += 'Lista kanałów: ' + diag.chFixed + ' z ' + diag.chTotal + ' przepisane z Apple na Widevine' + (diag.origPl ? ' (pl=' + esc(diag.origPl) + ')' : '') + '<br>';
+    if (diag.pbFixed) h += 'Odtwarzanie: przepisane z Apple na Widevine (' + diag.pbFixed + ')<br>';
     if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
     var asked = Object.keys(diag.mcap).map(function (k) { return esc(k) + ' → ' + esc(diag.mcap[k]); });
     diag.calls.forEach(function (c) { asked.push(esc(c.ks) + ' → ' + esc(c.res)); });
@@ -315,6 +317,134 @@
     return out.length ? ' [' + out.join(', ') + ']' : '';
   }
 
+  // ---------------------------------------------------------------- wersja kanałów dla Widevine zamiast Apple
+  // Serwer rozpoznaje telewizor jako urządzenie Apple i w liście kanałów podaje adresy dla FairPlay
+  // (licencja …/fairplay/…, strumień .m3u8). Telewizor ma Widevine, więc przepisujemy te adresy na
+  // wersję, którą dostaje zwykła przeglądarka na komputerze (licencja bez /fairplay/, strumień manifest.mpd).
+  function widevineUri(u) {
+    u = String(u);
+    var m = /[?&]pl=([^&#]*)/.exec(u);
+    if (m && !diag.origPl) diag.origPl = m[1];
+    return u.replace(/(\/drm\/[^\/?#]+\/)[^?#]*\.m3u8/i, '$1manifest.mpd').replace(/([?&]pl=)[^&#]*/, '$1web');
+  }
+  function toWidevine(c) {
+    if (!c || typeof c !== 'object') return false;
+    var lic = String(c.licenseProxyUri || '');
+    if (!(c.drm === 3 || /\/fairplay\//i.test(lic))) return false;
+    if (lic) c.licenseProxyUri = lic.replace(/\/fairplay\//i, '/');
+    if (c.drm === 3) c.drm = 1;
+    if (c.certificateUri) c.certificateUri = null;
+    if (typeof c.uri === 'string') c.uri = widevineUri(c.uri);
+    return true;
+  }
+  function jsonResponse(res, obj) {
+    return new Response(JSON.stringify(obj), {
+      status: res.status, statusText: res.statusText,
+      headers: { 'Content-Type': (res.headers && res.headers.get('content-type')) || 'application/json' }
+    });
+  }
+  function fixChannelsResponse(res) {
+    if (!res || !res.ok || !window.Response) return res;
+    return res.clone().text().then(function (txt) {
+      var j;
+      try { j = JSON.parse(txt); } catch (e) { return res; }
+      var list = j && j.channels;
+      if (!list || !list.length) return res;
+      var n = 0;
+      for (var i = 0; i < list.length; i++) if (toWidevine(list[i])) n++;
+      diag.chTotal = list.length;
+      diag.chFixed = n;
+      renderDiag();
+      return n ? jsonResponse(res, j) : res;
+    }, function () { return res; });
+  }
+  function fixPlaybackResponse(res) {
+    if (!res || !res.ok || !window.Response) return res;
+    return res.clone().text().then(function (txt) {
+      var j;
+      try { j = JSON.parse(txt); } catch (e) { return res; }
+      var d = j && j.drmInfo;
+      if (!d || !(/\/fairplay\//i.test(String(d.licenseProxyUri || '')) || /fairplay/i.test(String(d.drmType)) || d.drmType === 3)) return res;
+      d.licenseProxyUri = String(d.licenseProxyUri || '').replace(/\/fairplay\//i, '/');
+      d.drmType = typeof d.drmType === 'number' ? 1 : 'widevine';
+      d.certificateUri = '';
+      if (typeof j.uri === 'string') j.uri = widevineUri(j.uri);
+      diag.pbFixed = (diag.pbFixed || 0) + 1;
+      renderDiag();
+      return jsonResponse(res, j);
+    }, function () { return res; });
+  }
+
+  // Strona trzyma listę kanałów w pamięci przeglądarki. Jeśli zapisała wersję dla Apple, czyścimy ją
+  // i przeładowujemy stronę, żeby pobrała listę od nowa (już przepisaną). Najwyżej raz na 2 minuty.
+  function openExistingDb(name, done) {
+    // najpierw sprawdzamy, czy baza istnieje — nie wolno nam utworzyć pustej bazy za stronę
+    if (indexedDB.databases) {
+      indexedDB.databases().then(function (list) {
+        for (var i = 0; i < list.length; i++) if (list[i].name === name) { openDbNow(name, done); return; }
+        done(null);
+      }, function () { openDbNow(name, done); });
+      return;
+    }
+    openDbNow(name, done);
+  }
+  function openDbNow(name, done) {
+    var rq;
+    try { rq = indexedDB.open(name); } catch (e) { done(null); return; }
+    rq.onupgradeneeded = function () { try { rq.transaction.abort(); } catch (e) { /* nie tworzymy nowej bazy */ } };
+    rq.onsuccess = function () { done(rq.result); };
+    rq.onerror = function () { done(null); };
+    rq.onblocked = function () { done(null); };
+  }
+  function readAll(db, store, done) {
+    if (!db || !db.objectStoreNames.contains(store)) { done(''); return; }
+    try {
+      var r = db.transaction(store, 'readonly').objectStore(store).getAll();
+      r.onsuccess = function () { var s = ''; try { s = JSON.stringify(r.result); } catch (e) { s = ''; } done(s); };
+      r.onerror = function () { done(''); };
+    } catch (e) { done(''); }
+  }
+  function clearStore(db, store, key, done) {
+    if (!db || !db.objectStoreNames.contains(store)) { done(); return; }
+    try {
+      var tx = db.transaction(store, 'readwrite');
+      var os = tx.objectStore(store);
+      if (key) os['delete'](key); else os.clear();
+      tx.oncomplete = function () { done(); };
+      tx.onerror = tx.onabort = function () { done(); };
+    } catch (e) { done(); }
+  }
+  function purgeAppleChannelCache() {
+    if (!window.indexedDB) return;
+    var last = 0;
+    try { last = Number(localStorage.getItem('tvnav:cachefix')) || 0; } catch (e) { return; }
+    if (Date.now() - last < 120000) return;
+    openExistingDb('dotTV-database', function (db1) {
+      readAll(db1, 'datastore', function (s1) {
+        openExistingDb('CacheDB', function (db2) {
+          readAll(db2, 'CacheStore', function (s2) {
+            if (s1.indexOf('/fairplay/') < 0 && s2.indexOf('/fairplay/') < 0) {
+              if (db1) db1.close();
+              if (db2) db2.close();
+              return;
+            }
+            clearStore(db1, 'datastore', 'tv-storage', function () {
+              clearStore(db2, 'CacheStore', null, function () {
+                if (db1) db1.close();
+                if (db2) db2.close();
+                try {
+                  localStorage.removeItem('isTVCacheChecked');
+                  localStorage.setItem('tvnav:cachefix', String(Date.now()));
+                } catch (e) { /* trudno */ }
+                location.reload();
+              });
+            });
+          });
+        });
+      });
+    });
+  }
+
   function watchNet() {
     var of = window.fetch;
     if (of && !of.__tvnav) {
@@ -333,6 +463,9 @@
           }
         }
         var p = of.apply(window, args);
+        var bare = String(url).split('#')[0].split('?')[0];
+        if (/\/channels$/.test(bare) && String(method).toUpperCase() === 'GET') p = p.then(fixChannelsResponse);
+        else if (/playbackUrl$/i.test(bare)) p = p.then(fixPlaybackResponse);
         if (tag) {
           p.then(function (res) {
             var line = tag + ' → ' + res.status;
@@ -416,6 +549,7 @@
   // od razu, zanim strona zacznie odtwarzać (nie czekamy na zbudowanie strony)
   try { watchNet(); } catch (e) { /* bez zapisu sieci */ }
   try { watchMcap(); } catch (e) { /* bez zapisu pytań o DRM */ }
+  try { purgeAppleChannelCache(); } catch (e) { /* bez czyszczenia */ }
 
   function probe(label, ks, cfg, withKeys) {
     diag.order.push(label);
