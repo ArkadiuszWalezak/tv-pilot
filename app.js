@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.12-test' };
+  window.__tvNav = { version: '1.0.13-test' };
   // strona testu odtwarzania: zatrzymujemy wczytywanie serwisu, żeby nic innego nie odtwarzało obrazu
   if (location.pathname === '/tvnav-test') { try { window.stop(); } catch (e) { /* trudno */ } }
 
@@ -216,6 +216,11 @@
     if (diag.pbFixed) h += 'Odtwarzanie: przepisane z Apple na Widevine (' + diag.pbFixed + ')<br>';
     if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
     if (diag.keys) h += 'Klucze po licencji: ' + esc(diag.keys) + '<br>';
+    var wv = null;
+    try { wv = JSON.parse(localStorage.getItem('tvnav:wvres') || 'null'); } catch (e) { wv = null; }
+    if (wv && wv.length) {
+      h += 'Ostatni test filmów: ' + wv.map(function (r, i) { return (i + 1) + ') ' + esc(dShort(String(r || '–'), 60)); }).join(' · ') + '<br>';
+    }
     var asked = Object.keys(diag.mcap).map(function (k) { return esc(k) + ' → ' + esc(diag.mcap[k]); });
     diag.calls.forEach(function (c) { asked.push(esc(c.ks) + ' → ' + esc(c.res)); });
     if (asked.length) h += 'Strona pytała o DRM: ' + asked.join(' · ') + '<br>';
@@ -1491,7 +1496,8 @@
       return vid;
     }
     function render() {
-      var h = '<b style="color:#ffc400">TEST ODTWARZANIA</b> (tv-pilot ' + esc(window.__tvNav.version) + ')' + (extra ? ' · ' + esc(extra) : '') + '<br>';
+      var h = '<b style="color:#ffc400">TEST ODTWARZANIA</b> (tv-pilot ' + esc(window.__tvNav.version) + ')' + (extra ? ' · ' + esc(extra) : '') +
+        (finished ? '' : ' · <b>nic nie naciskaj, aż pojawi się „Gotowe”</b>') + '<br>';
       for (var i = 0; i < TESTS.length; i++) h += (i + 1) + '. ' + esc(TESTS[i].name) + ': ' + esc(res[i] || (live && i === res.length ? 'sprawdzam…' : '–')) + '<br>';
       if (live && !finished) h += '<span style="opacity:.75">' + esc(live) + '</span><br>';
       if (finished) h += '<b>Gotowe. Zrób zdjęcie, potem naciśnij OK, aby wrócić do telewizji.</b>';
@@ -1557,6 +1563,7 @@
           (fr !== null ? ', klatki ' + fr : '') + ')';
         live = '';
         render();
+        try { localStorage.setItem('tvnav:wvres', JSON.stringify(res)); } catch (e) { /* trudno */ }
         var next = function () {
           try { v.removeAttribute('src'); v.load(); } catch (e) { /* trudno */ }
           setTimeout(function () { runClip(i + 1); }, 1500);
@@ -1564,6 +1571,7 @@
         if (player) { try { player.destroy().then(next, next); } catch (e) { next(); } } else next();
       }, 500);
     }
+    try { localStorage.removeItem('tvnav:wvres'); } catch (e) { /* trudno */ }
     render();
     if (window.shaka && window.shaka.Player) { runClip(0); return; }
     var s = document.createElement('script');
@@ -1586,8 +1594,8 @@
     try { ['tvnav:robi', 'tvnav:robres', 'tvnav:robok'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { /* trudno */ }
     // jednorazowo: po zalogowaniu przejdź do testu odtwarzania
     try {
-      if (hasSession() && localStorage.getItem('tvnav:wvtest') !== '3') {
-        localStorage.setItem('tvnav:wvtest', '3');
+      if (hasSession() && localStorage.getItem('tvnav:wvtest') !== '4') {
+        localStorage.setItem('tvnav:wvtest', '4');
         location.replace(TEST_PATH);
         return;
       }
