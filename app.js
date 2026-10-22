@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.8-test' };
+  window.__tvNav = { version: '1.0.9-test' };
 
   // Przeglądarka aplikacji na telewizorze przedstawia się bez słowa „Chrome”, więc strona bierze ją za Safari
   // i wybiera zabezpieczenie Apple (FairPlay), którego telewizor nie ma. Dopisujemy „Chrome/wersja”,
@@ -213,6 +213,12 @@
     if (diag.pbFixed) h += 'Odtwarzanie: przepisane z Apple na Widevine (' + diag.pbFixed + ')<br>';
     if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
     if (diag.keys) h += 'Klucze po licencji: ' + esc(diag.keys) + '<br>';
+    if (typeof rob !== 'undefined' && rob) {
+      h += 'Tryby Widevine: ' + ROB.map(function (r, i) {
+        var st = rob.res[r] || (robActive() && i === rob.i ? 'sprawdzam…' : '–');
+        return esc(r.replace('_SECURE_', ' ')) + ' ' + esc(st);
+      }).join(' · ') + (rob.ok ? ' → używam ' + esc(rob.ok) : (!robActive() ? ' → żaden nie zadziałał' : '')) + '<br>';
+    }
     var asked = Object.keys(diag.mcap).map(function (k) { return esc(k) + ' → ' + esc(diag.mcap[k]); });
     diag.calls.forEach(function (c) { asked.push(esc(c.ks) + ' → ' + esc(c.res)); });
     if (asked.length) h += 'Strona pytała o DRM: ' + asked.join(' · ') + '<br>';
@@ -529,6 +535,11 @@
     if (!mc || !mc.decodingInfo || mc.decodingInfo.__tvnav) return;
     var od = mc.decodingInfo;
     var w = function (cfg) {
+      var ksc = cfg && cfg.keySystemConfiguration;
+      if (ksc && /widevine/i.test(String(ksc.keySystem)) && robValue() !== null) {
+        if (!ksc.video && cfg.video) ksc.video = {};
+        if (ksc.video) robPatchVideo(ksc.video);
+      }
       var p = od.apply(mc, arguments);
       var ks = cfg && cfg.keySystemConfiguration && cfg.keySystemConfiguration.keySystem;
       if (ks && p && p.then) {
@@ -547,6 +558,78 @@
     w.__tvnav = true;
     try { mc.decodingInfo = w; } catch (e) { /* nie da się podmienić */ }
   }
+  // ---------------------------------------------------------------- TEST: tryby odszyfrowania Widevine
+  // Telewizor dostaje licencję, ale nie dekoduje obrazu (błąd 3). Sprawdzamy po kolei tryby Widevine
+  // (sprzętowe i programowe). Po błędzie zapisujemy wynik, bierzemy następny tryb i przeładowujemy stronę.
+  var ROB = ['HW_SECURE_ALL', 'HW_SECURE_DECODE', 'HW_SECURE_CRYPTO', 'SW_SECURE_DECODE', 'SW_SECURE_CRYPTO'];
+  var rob = { i: 0, res: {}, ok: '', failed: false, timer: null, start: 0 };
+  try {
+    rob.i = Number(localStorage.getItem('tvnav:robi')) || 0;
+    rob.res = JSON.parse(localStorage.getItem('tvnav:robres') || '{}') || {};
+    rob.ok = localStorage.getItem('tvnav:robok') || '';
+  } catch (e) { /* bez zapamiętywania */ }
+  function robActive() { return !rob.ok && rob.i < ROB.length; }
+  function robValue() { return rob.ok || (robActive() ? ROB[rob.i] : null); }
+  function robSave() {
+    try {
+      localStorage.setItem('tvnav:robi', String(rob.i));
+      localStorage.setItem('tvnav:robres', JSON.stringify(rob.res));
+      if (rob.ok) localStorage.setItem('tvnav:robok', rob.ok);
+    } catch (e) { /* trudno */ }
+  }
+  function robPatchVideo(v) {
+    var r = robValue();
+    if (r !== null && v) v.robustness = r;
+    return v;
+  }
+  function robPatchCfgs(ks, cfgs) {
+    if (robValue() === null || !/widevine/i.test(String(ks)) || !cfgs || !cfgs.length) return cfgs;
+    var out = [];
+    for (var i = 0; i < cfgs.length; i++) {
+      var o = {}, c = cfgs[i];
+      for (var k in c) o[k] = c[k];
+      if (c.videoCapabilities) {
+        o.videoCapabilities = [];
+        for (var j = 0; j < c.videoCapabilities.length; j++) {
+          var vc = {}, src = c.videoCapabilities[j];
+          for (var m in src) vc[m] = src[m];
+          o.videoCapabilities.push(robPatchVideo(vc));
+        }
+      }
+      out.push(o);
+    }
+    return out;
+  }
+  function robFail(why) {
+    if (!robActive() || rob.failed) return;
+    rob.failed = true;
+    clearTimeout(rob.timer);
+    rob.res[ROB[rob.i]] = why;
+    rob.i++;
+    robSave();
+    renderDiag();
+    setTimeout(function () { location.reload(); }, 3000);
+  }
+  function robSuccess() {
+    if (!robActive() || rob.failed) return;
+    clearTimeout(rob.timer);
+    rob.ok = ROB[rob.i];
+    rob.res[rob.ok] = 'DZIAŁA';
+    robSave();
+    renderDiag();
+  }
+  // po licencji: obraz działa, gdy czas filmu przesunie się o 3 s; brak obrazu po 45 s = porażka
+  function robKeysUsable() {
+    if (!robActive() || rob.failed || rob.timer) return;
+    rob.timer = setTimeout(function () { robFail('brak obrazu po 45 s'); }, 45000);
+  }
+  document.addEventListener('timeupdate', function (e) {
+    var v = e.target;
+    if (!v || v.tagName !== 'VIDEO' || !robActive() || rob.failed || !rob.timer) return;
+    if (!rob.start) rob.start = v.currentTime || 0.001;
+    if (v.currentTime - rob.start > 3 && v.videoWidth > 0 && !v.error) robSuccess();
+  }, true);
+
   // od razu, zanim strona zacznie odtwarzać (nie czekamy na zbudowanie strony)
   try { watchNet(); } catch (e) { /* bez zapisu sieci */ }
   try { watchMcap(); } catch (e) { /* bez zapisu pytań o DRM */ }
@@ -612,6 +695,7 @@
           for (var k in cnt) parts.push(k + (cnt[k] > 1 ? ' ×' + cnt[k] : ''));
           diag.keys = parts.join(', ') || 'brak kluczy';
           renderDiag();
+          if (cnt.usable) robKeysUsable();
         });
       } catch (e) { /* bez podglądu */ }
       return s;
@@ -629,13 +713,14 @@
         diag.calls.push(rec);
         if (diag.calls.length > 5) diag.calls.shift();
         renderDiag();
-        var p = orig.apply(navigator, arguments);
+        var use = robPatchCfgs(ks, cfgs);
+        var p = use === cfgs ? orig.apply(navigator, arguments) : orig.call(navigator, ks, use);
         // gdy telewizor odmówi tylko z powodu „trwałego stanu”, pytamy jeszcze raz bez tego wymogu
-        if (p && p.then && /widevine|playready/i.test(String(ks)) && cfgs && cfgs.length) {
+        if (p && p.then && /widevine|playready/i.test(String(ks)) && use && use.length) {
           p = p.then(null, function (err) {
             var relaxed = [], changed = false;
-            for (var i = 0; i < cfgs.length; i++) {
-              var o = {}, c = cfgs[i];
+            for (var i = 0; i < use.length; i++) {
+              var o = {}, c = use[i];
               for (var k in c) o[k] = c[k];
               if (o.persistentState === 'required') { o.persistentState = 'optional'; changed = true; }
               if (o.distinctiveIdentifier === 'required') { o.distinctiveIdentifier = 'optional'; changed = true; }
@@ -655,7 +740,10 @@
     document.addEventListener('encrypted', function (e) { diag.encrypted = e.initDataType || '?'; renderDiag(); }, true);
     document.addEventListener('error', function (e) {
       var t = e.target;
-      if (t && t.tagName === 'VIDEO') dNote('Odtwarzacz: błąd ' + (t.error ? t.error.code + ' ' + (t.error.message || '') : ''));
+      if (t && t.tagName === 'VIDEO') {
+        dNote('Odtwarzacz: błąd ' + (t.error ? t.error.code + ' ' + (t.error.message || '') : ''));
+        if (t.error) robFail('błąd ' + t.error.code);
+      }
     }, true);
     ['error', 'warn'].forEach(function (m) {
       var o = console[m];
@@ -670,6 +758,7 @@
             return String(x);
           }).join(' ');
           if (/drm|shaka|eme|key ?system|licen|widevine|decrypt|media|error code/i.test(s)) dNote(s);
+          if (/Shaka 600[01]\b/.test(s)) robFail('nieobsługiwany');
         } catch (er) { /* ignorujemy */ }
         return o.apply(console, arguments);
       };
