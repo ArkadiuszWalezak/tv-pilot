@@ -15,7 +15,9 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.9-test' };
+  window.__tvNav = { version: '1.0.10-test' };
+  // strona testu odtwarzania: zatrzymujemy wczytywanie serwisu, żeby nic innego nie odtwarzało obrazu
+  if (location.pathname === '/tvnav-test') { try { window.stop(); } catch (e) { /* trudno */ } }
 
   // Przeglądarka aplikacji na telewizorze przedstawia się bez słowa „Chrome”, więc strona bierze ją za Safari
   // i wybiera zabezpieczenie Apple (FairPlay), którego telewizor nie ma. Dopisujemy „Chrome/wersja”,
@@ -213,12 +215,6 @@
     if (diag.pbFixed) h += 'Odtwarzanie: przepisane z Apple na Widevine (' + diag.pbFixed + ')<br>';
     if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
     if (diag.keys) h += 'Klucze po licencji: ' + esc(diag.keys) + '<br>';
-    if (typeof rob !== 'undefined' && rob) {
-      h += 'Tryby Widevine: ' + ROB.map(function (r, i) {
-        var st = rob.res[r] || (robActive() && i === rob.i ? 'sprawdzam…' : '–');
-        return esc(r.replace('_SECURE_', ' ')) + ' ' + esc(st);
-      }).join(' · ') + (rob.ok ? ' → używam ' + esc(rob.ok) : (!robActive() ? ' → żaden nie zadziałał' : '')) + '<br>';
-    }
     var asked = Object.keys(diag.mcap).map(function (k) { return esc(k) + ' → ' + esc(diag.mcap[k]); });
     diag.calls.forEach(function (c) { asked.push(esc(c.ks) + ' → ' + esc(c.res)); });
     if (asked.length) h += 'Strona pytała o DRM: ' + asked.join(' · ') + '<br>';
@@ -535,11 +531,6 @@
     if (!mc || !mc.decodingInfo || mc.decodingInfo.__tvnav) return;
     var od = mc.decodingInfo;
     var w = function (cfg) {
-      var ksc = cfg && cfg.keySystemConfiguration;
-      if (ksc && /widevine/i.test(String(ksc.keySystem)) && robValue() !== null) {
-        if (!ksc.video && cfg.video) ksc.video = {};
-        if (ksc.video) robPatchVideo(ksc.video);
-      }
       var p = od.apply(mc, arguments);
       var ks = cfg && cfg.keySystemConfiguration && cfg.keySystemConfiguration.keySystem;
       if (ks && p && p.then) {
@@ -558,78 +549,6 @@
     w.__tvnav = true;
     try { mc.decodingInfo = w; } catch (e) { /* nie da się podmienić */ }
   }
-  // ---------------------------------------------------------------- TEST: tryby odszyfrowania Widevine
-  // Telewizor dostaje licencję, ale nie dekoduje obrazu (błąd 3). Sprawdzamy po kolei tryby Widevine
-  // (sprzętowe i programowe). Po błędzie zapisujemy wynik, bierzemy następny tryb i przeładowujemy stronę.
-  var ROB = ['HW_SECURE_ALL', 'HW_SECURE_DECODE', 'HW_SECURE_CRYPTO', 'SW_SECURE_DECODE', 'SW_SECURE_CRYPTO'];
-  var rob = { i: 0, res: {}, ok: '', failed: false, timer: null, start: 0 };
-  try {
-    rob.i = Number(localStorage.getItem('tvnav:robi')) || 0;
-    rob.res = JSON.parse(localStorage.getItem('tvnav:robres') || '{}') || {};
-    rob.ok = localStorage.getItem('tvnav:robok') || '';
-  } catch (e) { /* bez zapamiętywania */ }
-  function robActive() { return !rob.ok && rob.i < ROB.length; }
-  function robValue() { return rob.ok || (robActive() ? ROB[rob.i] : null); }
-  function robSave() {
-    try {
-      localStorage.setItem('tvnav:robi', String(rob.i));
-      localStorage.setItem('tvnav:robres', JSON.stringify(rob.res));
-      if (rob.ok) localStorage.setItem('tvnav:robok', rob.ok);
-    } catch (e) { /* trudno */ }
-  }
-  function robPatchVideo(v) {
-    var r = robValue();
-    if (r !== null && v) v.robustness = r;
-    return v;
-  }
-  function robPatchCfgs(ks, cfgs) {
-    if (robValue() === null || !/widevine/i.test(String(ks)) || !cfgs || !cfgs.length) return cfgs;
-    var out = [];
-    for (var i = 0; i < cfgs.length; i++) {
-      var o = {}, c = cfgs[i];
-      for (var k in c) o[k] = c[k];
-      if (c.videoCapabilities) {
-        o.videoCapabilities = [];
-        for (var j = 0; j < c.videoCapabilities.length; j++) {
-          var vc = {}, src = c.videoCapabilities[j];
-          for (var m in src) vc[m] = src[m];
-          o.videoCapabilities.push(robPatchVideo(vc));
-        }
-      }
-      out.push(o);
-    }
-    return out;
-  }
-  function robFail(why) {
-    if (!robActive() || rob.failed) return;
-    rob.failed = true;
-    clearTimeout(rob.timer);
-    rob.res[ROB[rob.i]] = why;
-    rob.i++;
-    robSave();
-    renderDiag();
-    setTimeout(function () { location.reload(); }, 3000);
-  }
-  function robSuccess() {
-    if (!robActive() || rob.failed) return;
-    clearTimeout(rob.timer);
-    rob.ok = ROB[rob.i];
-    rob.res[rob.ok] = 'DZIAŁA';
-    robSave();
-    renderDiag();
-  }
-  // po licencji: obraz działa, gdy czas filmu przesunie się o 3 s; brak obrazu po 45 s = porażka
-  function robKeysUsable() {
-    if (!robActive() || rob.failed || rob.timer) return;
-    rob.timer = setTimeout(function () { robFail('brak obrazu po 45 s'); }, 45000);
-  }
-  document.addEventListener('timeupdate', function (e) {
-    var v = e.target;
-    if (!v || v.tagName !== 'VIDEO' || !robActive() || rob.failed || !rob.timer) return;
-    if (!rob.start) rob.start = v.currentTime || 0.001;
-    if (v.currentTime - rob.start > 3 && v.videoWidth > 0 && !v.error) robSuccess();
-  }, true);
-
   // od razu, zanim strona zacznie odtwarzać (nie czekamy na zbudowanie strony)
   try { watchNet(); } catch (e) { /* bez zapisu sieci */ }
   try { watchMcap(); } catch (e) { /* bez zapisu pytań o DRM */ }
@@ -695,7 +614,6 @@
           for (var k in cnt) parts.push(k + (cnt[k] > 1 ? ' ×' + cnt[k] : ''));
           diag.keys = parts.join(', ') || 'brak kluczy';
           renderDiag();
-          if (cnt.usable) robKeysUsable();
         });
       } catch (e) { /* bez podglądu */ }
       return s;
@@ -713,14 +631,13 @@
         diag.calls.push(rec);
         if (diag.calls.length > 5) diag.calls.shift();
         renderDiag();
-        var use = robPatchCfgs(ks, cfgs);
-        var p = use === cfgs ? orig.apply(navigator, arguments) : orig.call(navigator, ks, use);
+        var p = orig.apply(navigator, arguments);
         // gdy telewizor odmówi tylko z powodu „trwałego stanu”, pytamy jeszcze raz bez tego wymogu
-        if (p && p.then && /widevine|playready/i.test(String(ks)) && use && use.length) {
+        if (p && p.then && /widevine|playready/i.test(String(ks)) && cfgs && cfgs.length) {
           p = p.then(null, function (err) {
             var relaxed = [], changed = false;
-            for (var i = 0; i < use.length; i++) {
-              var o = {}, c = use[i];
+            for (var i = 0; i < cfgs.length; i++) {
+              var o = {}, c = cfgs[i];
               for (var k in c) o[k] = c[k];
               if (o.persistentState === 'required') { o.persistentState = 'optional'; changed = true; }
               if (o.distinctiveIdentifier === 'required') { o.distinctiveIdentifier = 'optional'; changed = true; }
@@ -742,7 +659,6 @@
       var t = e.target;
       if (t && t.tagName === 'VIDEO') {
         dNote('Odtwarzacz: błąd ' + (t.error ? t.error.code + ' ' + (t.error.message || '') : ''));
-        if (t.error) robFail('błąd ' + t.error.code);
       }
     }, true);
     ['error', 'warn'].forEach(function (m) {
@@ -758,7 +674,6 @@
             return String(x);
           }).join(' ');
           if (/drm|shaka|eme|key ?system|licen|widevine|decrypt|media|error code/i.test(s)) dNote(s);
-          if (/Shaka 600[01]\b/.test(s)) robFail('nieobsługiwany');
         } catch (er) { /* ignorujemy */ }
         return o.apply(console, arguments);
       };
@@ -1538,8 +1453,116 @@
     }
   }
 
+  // ---------------------------------------------------------------- TEST: przykładowe filmy z zabezpieczeniem i bez
+  // Sprawdza, czy w TizenBrew w ogóle da się odtworzyć film z Widevine (publiczne filmy testowe Google i DASH-IF).
+  // Wynik pokazuje, czy problem leży w kanałach serwisu, czy w samym środowisku TizenBrew.
+  var TEST_PATH = '/tvnav-test';
+  var TESTS = [
+    { name: 'Film bez zabezpieczeń', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', drm: null },
+    { name: 'Widevine cenc', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one-widevine/dash.mpd', drm: { 'com.widevine.alpha': 'https://proxy.uat.widevine.com/proxy' } },
+    { name: 'Widevine cbcs (jak w kanałach)', uri: 'https://livesim2.dashif.org/livesim2/drm_EZDRM-1-key-cbcs/testpic_2s/Manifest.mpd', drm: { 'com.widevine.alpha': 'https://widevine-dash.ezdrm.com/proxy?pX=3B0669' } }
+  ];
+  function frameCount(v) {
+    try { var q = v.getVideoPlaybackQuality && v.getVideoPlaybackQuality(); if (q) return q.totalVideoFrames; } catch (e) { /* brak */ }
+    return v.webkitDecodedFrameCount !== undefined ? v.webkitDecodedFrameCount : null;
+  }
+  function runWvTest() {
+    var finished = false;
+    var box = document.createElement('div');
+    box.id = 'tvnav-wvtest';
+    box.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483600;background:#000;color:#fff;' +
+      'font:400 2.6vh/1.45 Arial,Helvetica,sans-serif;';
+    var vid = document.createElement('video');
+    vid.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;';
+    vid.autoplay = true;
+    var info = document.createElement('div');
+    info.style.cssText = 'position:absolute;left:3vw;bottom:4vh;max-width:75vw;background:rgba(0,0,0,.82);' +
+      'border:3px solid #ffc400;border-radius:12px;padding:1.6vh 1.6vw;';
+    box.appendChild(vid);
+    box.appendChild(info);
+    document.body.appendChild(box);
+    var res = [], live = '';
+    function render() {
+      var h = '<b style="color:#ffc400">TEST ODTWARZANIA</b> (tv-pilot ' + esc(window.__tvNav.version) + ')<br>';
+      for (var i = 0; i < TESTS.length; i++) h += (i + 1) + '. ' + esc(TESTS[i].name) + ': ' + esc(res[i] || (live && i === res.length ? 'sprawdzam…' : '–')) + '<br>';
+      if (live && !finished) h += '<span style="opacity:.75">' + esc(live) + '</span><br>';
+      if (finished) h += '<b>Gotowe. Zrób zdjęcie, potem naciśnij OK, aby wrócić do telewizji.</b>';
+      info.innerHTML = h;
+    }
+    function back() { location.replace('/tv'); }
+    window.addEventListener('keydown', function (e) {
+      var k = e.keyCode;
+      if (k === 13 || k === 10009 || k === 8 || k === 27) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (finished || k !== 13) back();
+      }
+    }, true);
+    function runClip(i) {
+      if (i >= TESTS.length) { finished = true; render(); return; }
+      var t = TESTS[i], st = { start: null, dt: 0, err: '' }, t0 = Date.now(), player;
+      var onErr = function () { if (vid.error) st.err = 'błąd odtwarzacza ' + vid.error.code + (vid.error.code === 3 ? ' (dekodowanie)' : ''); };
+      vid.addEventListener('error', onErr);
+      try {
+        player = new shaka.Player();
+        player.addEventListener('error', function (ev) { if (!st.err) st.err = shakaErr(ev.detail || {}); });
+        player.attach(vid).then(function () {
+          player.configure({ drm: { servers: t.drm || {} } });
+          return player.load(t.uri);
+        }).then(function () {
+          try { var pr = vid.play(); if (pr && pr['catch']) pr['catch'](function () { /* autoodtwarzanie */ }); } catch (e) { /* trudno */ }
+        }, function (e) { if (!st.err) st.err = e && typeof e.code === 'number' ? shakaErr(e) : dErr(e); });
+      } catch (e) { st.err = dErr(e); }
+      var iv = setInterval(function () {
+        // gdyby serwis jednak coś odtwarzał — zatrzymujemy, żeby nie zajmował dekodera
+        var others = document.querySelectorAll('video');
+        for (var o = 0; o < others.length; o++) if (others[o] !== vid) { try { others[o].pause(); others[o].muted = true; } catch (e) { /* trudno */ } }
+        if (st.start === null && vid.currentTime > 0) st.start = vid.currentTime;
+        if (st.start !== null) st.dt = Math.max(st.dt, vid.currentTime - st.start);
+        var secs = Math.round((Date.now() - t0) / 1000);
+        live = t.name + ': ' + secs + ' s, czas filmu +' + st.dt.toFixed(1) + ' s, obraz ' + vid.videoWidth + '×' + vid.videoHeight + (st.err ? ', ' + st.err : '');
+        render();
+        if (!(Date.now() - t0 > 25000 || (st.err && Date.now() - t0 > 4000) || st.dt > 8)) return;
+        clearInterval(iv);
+        vid.removeEventListener('error', onErr);
+        var fr = frameCount(vid);
+        var ok = st.dt > 3 && vid.videoWidth > 0 && !st.err;
+        res[i] = (ok ? 'DZIAŁA' : (st.err || 'brak obrazu')) + ' (czas +' + st.dt.toFixed(1) + ' s, ' + vid.videoWidth + '×' + vid.videoHeight +
+          (fr !== null ? ', klatki ' + fr : '') + ')';
+        live = '';
+        render();
+        var next = function () { setTimeout(function () { runClip(i + 1); }, 1000); };
+        try { player.destroy().then(next, next); } catch (e) { next(); }
+      }, 500);
+    }
+    render();
+    if (window.shaka && window.shaka.Player) { runClip(0); return; }
+    var s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.11.21/shaka-player.compiled.js';
+    s.onload = function () {
+      try { shaka.polyfill.installAll(); } catch (e) { /* bez poprawek */ }
+      runClip(0);
+    };
+    s.onerror = function () { live = 'Nie udało się wczytać odtwarzacza testowego.'; finished = true; render(); };
+    (document.head || document.documentElement).appendChild(s);
+  }
+
   function init() {
+    if (location.pathname === TEST_PATH) {
+      if (!document.body) document.documentElement.appendChild(document.createElement('body'));
+      runWvTest();
+      return;
+    }
     if (!document.body) { document.addEventListener('DOMContentLoaded', init); return; }
+    try { ['tvnav:robi', 'tvnav:robres', 'tvnav:robok'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { /* trudno */ }
+    // jednorazowo: po zalogowaniu przejdź do testu odtwarzania
+    try {
+      if (hasSession() && localStorage.getItem('tvnav:wvtest') !== '1') {
+        localStorage.setItem('tvnav:wvtest', '1');
+        location.replace(TEST_PATH);
+        return;
+      }
+    } catch (e) { /* bez testu */ }
     buildUi();
     watchDrm();
     renderDiag();
