@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.15-test' };
+  window.__tvNav = { version: '1.0.16-test' };
   // strona testu odtwarzania: zatrzymujemy wczytywanie serwisu, żeby nic innego nie odtwarzało obrazu
   if (location.pathname === '/tvnav-test') { try { window.stop(); } catch (e) { /* trudno */ } }
 
@@ -1477,13 +1477,14 @@
     { v: 'SW_SECURE_DECODE', a: 'SW_SECURE_DECODE' },
     { v: 'SW_SECURE_CRYPTO', a: 'SW_SECURE_CRYPTO' }
   ];
-  var ax = { i: 0, res: [], ok: -1, restart: false };
+  // zestaw 1 już sprawdzony (stoi); zestaw 2 sprawdzamy jeszcze raz, bo poprzednia wersja źle oceniła skok czasu
+  var ax = { i: 1, res: ['stoi (+0.0 s)'], ok: -1, restart: false };
   try {
-    var axs = JSON.parse(localStorage.getItem('tvnav:ax') || 'null');
+    var axs = JSON.parse(localStorage.getItem('tvnav:ax2') || 'null');
     if (axs && axs.res) ax = { i: axs.i || 0, res: axs.res, ok: axs.ok === undefined ? -1 : axs.ok, restart: false };
   } catch (e) { /* od początku */ }
-  var axRun = { keysAt: 0, t0: 0, done: false };
-  function axSave() { try { localStorage.setItem('tvnav:ax', JSON.stringify({ i: ax.i, res: ax.res, ok: ax.ok })); } catch (e) { /* trudno */ } }
+  var axRun = { keysAt: 0, last: null, prog: 0, f0: null, done: false };
+  function axSave() { try { localStorage.setItem('tvnav:ax2', JSON.stringify({ i: ax.i, res: ax.res, ok: ax.ok })); } catch (e) { /* trudno */ } }
   function axActive() { return ax.ok < 0 && ax.i < AX.length; }
   function axCombo() { return ax.ok >= 0 ? AX[ax.ok] : (axActive() ? AX[ax.i] : null); }
   function axName(c) { return (c.v ? c.v.replace('_SECURE_', ' ') : 'domyślny') + ' / ' + c.a.replace('_SECURE_', ' '); }
@@ -1524,14 +1525,19 @@
     axFinish('błąd 3 (dekoder)', false);
   }
   // wywoływane co sekundę przez podgląd odtwarzania
+  // liczymy tylko zwykły upływ czasu (0–3 s na sekundę) — skok do „na żywo” nie jest odtwarzaniem
   function axTick(v, t) {
     if (!axActive() || axRun.done) return;
     if (!axRun.keysAt) {
-      if (diag.keys && diag.keys.indexOf('usable') >= 0) { axRun.keysAt = Date.now(); axRun.t0 = t; }
+      if (diag.keys && diag.keys.indexOf('usable') >= 0) { axRun.keysAt = Date.now(); axRun.last = t; axRun.f0 = frameCount(v); }
       return;
     }
-    if (t - axRun.t0 > 25 && v.videoWidth > 0 && !v.error) { axFinish('DZIAŁA', false); return; }
-    if (Date.now() - axRun.keysAt > 50000) axFinish('stoi (+' + (t - axRun.t0).toFixed(1) + ' s)', true);
+    var d = t - axRun.last;
+    if (d > 0 && d < 3 && !v.paused) axRun.prog += d;
+    axRun.last = t;
+    var fr = frameCount(v), frames = fr !== null && axRun.f0 !== null ? fr - axRun.f0 : null;
+    if (axRun.prog > 25 && v.videoWidth > 0 && !v.error && (frames === null || frames > 100)) { axFinish('DZIAŁA', false); return; }
+    if (Date.now() - axRun.keysAt > 50000) axFinish('stoi (+' + axRun.prog.toFixed(1) + ' s' + (frames !== null ? ', klatki ' + frames : '') + ')', true);
   }
   function axLine() {
     var h = 'Tryby obraz / dźwięk: ';
