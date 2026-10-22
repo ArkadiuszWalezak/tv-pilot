@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.7-test' };
+  window.__tvNav = { version: '1.0.8-test' };
 
   // Przeglądarka aplikacji na telewizorze przedstawia się bez słowa „Chrome”, więc strona bierze ją za Safari
   // i wybiera zabezpieczenie Apple (FairPlay), którego telewizor nie ma. Dopisujemy „Chrome/wersja”,
@@ -212,6 +212,7 @@
     if (diag.chTotal !== undefined) h += 'Lista kanałów: ' + diag.chFixed + ' z ' + diag.chTotal + ' przepisane z Apple na Widevine' + (diag.origPl ? ' (pl=' + esc(diag.origPl) + ')' : '') + '<br>';
     if (diag.pbFixed) h += 'Odtwarzanie: przepisane z Apple na Widevine (' + diag.pbFixed + ')<br>';
     if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
+    if (diag.keys) h += 'Klucze po licencji: ' + esc(diag.keys) + '<br>';
     var asked = Object.keys(diag.mcap).map(function (k) { return esc(k) + ' → ' + esc(diag.mcap[k]); });
     diag.calls.forEach(function (c) { asked.push(esc(c.ks) + ' → ' + esc(c.res)); });
     if (asked.length) h += 'Strona pytała o DRM: ' + asked.join(' · ') + '<br>';
@@ -550,6 +551,7 @@
   try { watchNet(); } catch (e) { /* bez zapisu sieci */ }
   try { watchMcap(); } catch (e) { /* bez zapisu pytań o DRM */ }
   try { purgeAppleChannelCache(); } catch (e) { /* bez czyszczenia */ }
+  try { watchKeyStatus(); } catch (e) { /* bez podglądu kluczy */ }
 
   function probe(label, ks, cfg, withKeys) {
     diag.order.push(label);
@@ -560,6 +562,14 @@
     try { p = fn.call(navigator, ks, cfg); } catch (e) { diag.probes[label] = 'NIE: ' + dShort(dErr(e), 80); renderDiag(); return; }
     p.then(function (access) {
       diag.probes[label] = 'TAK';
+      if (withKeys === 'scheme') {
+        // czy przeglądarka potwierdziła rodzaj szyfrowania (pole encryptionScheme)
+        var sc;
+        try { sc = access.getConfiguration().videoCapabilities[0].encryptionScheme; } catch (e) { sc = undefined; }
+        diag.probes[label] = sc === undefined ? 'TAK (bez potwierdzenia schematu)' : 'TAK (' + sc + ')';
+        renderDiag();
+        return;
+      }
       renderDiag();
       if (!withKeys) return;
       access.createMediaKeys().then(function () {
@@ -578,19 +588,35 @@
   function runProbes() {
     var v = 'video/mp4; codecs="avc1.42E01E"', a = 'audio/mp4; codecs="mp4a.40.2"';
     probe('Widevine', 'com.widevine.alpha', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: v }] }], true);
-    probe('Widevine (pełne)', 'com.widevine.alpha', [{
-      initDataTypes: ['cenc'],
-      audioCapabilities: [{ contentType: a, robustness: '' }],
-      videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.640028"', robustness: '' }],
-      distinctiveIdentifier: 'optional', persistentState: 'optional', sessionTypes: ['temporary']
-    }], false);
-    probe('Widevine (trwały stan)', 'com.widevine.alpha', [{
-      initDataTypes: ['cenc'],
-      videoCapabilities: [{ contentType: v }],
-      persistentState: 'required'
-    }], false);
     probe('PlayReady', 'com.microsoft.playready', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: v }] }], true);
-    probe('ClearKey', 'org.w3.clearkey', [{ initDataTypes: ['cenc', 'keyids'], videoCapabilities: [{ contentType: v }] }], false);
+    // Kanały są szyfrowane metodą „cbcs” (ta sama, której używa Apple). Sprawdzamy, czy telewizor ją obsługuje.
+    var hd = 'video/mp4; codecs="avc1.4d401f"';
+    probe('Widevine cenc', 'com.widevine.alpha', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: hd, encryptionScheme: 'cenc' }] }], 'scheme');
+    probe('Widevine cbcs', 'com.widevine.alpha', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: hd, encryptionScheme: 'cbcs' }] }], 'scheme');
+    probe('PlayReady cbcs', 'com.microsoft.playready', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: hd, encryptionScheme: 'cbcs' }] }], 'scheme');
+    probe('Widevine sprzętowo', 'com.widevine.alpha', [{ initDataTypes: ['cenc'], videoCapabilities: [{ contentType: hd, robustness: 'HW_SECURE_ALL' }], audioCapabilities: [{ contentType: a, robustness: 'SW_SECURE_CRYPTO' }] }], false);
+  }
+
+  // stan kluczy po otrzymaniu licencji (np. usable = klucz działa, output-restricted = zablokowany)
+  function watchKeyStatus() {
+    var MK = window.MediaKeys && MediaKeys.prototype;
+    if (!MK || !MK.createSession || MK.createSession.__tvnav) return;
+    var oc = MK.createSession;
+    MK.createSession = function () {
+      var s = oc.apply(this, arguments);
+      try {
+        s.addEventListener('keystatuseschange', function () {
+          var cnt = {};
+          try { s.keyStatuses.forEach(function (st) { st = String(st); cnt[st] = (cnt[st] || 0) + 1; }); } catch (e) { /* brak */ }
+          var parts = [];
+          for (var k in cnt) parts.push(k + (cnt[k] > 1 ? ' ×' + cnt[k] : ''));
+          diag.keys = parts.join(', ') || 'brak kluczy';
+          renderDiag();
+        });
+      } catch (e) { /* bez podglądu */ }
+      return s;
+    };
+    MK.createSession.__tvnav = true;
   }
 
   // zapisujemy, o jaki DRM pyta sama strona i co odpowiada telewizor
