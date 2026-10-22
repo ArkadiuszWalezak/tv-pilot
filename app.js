@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.13-test' };
+  window.__tvNav = { version: '1.0.14-test' };
   // strona testu odtwarzania: zatrzymujemy wczytywanie serwisu, żeby nic innego nie odtwarzało obrazu
   if (location.pathname === '/tvnav-test') { try { window.stop(); } catch (e) { /* trudno */ } }
 
@@ -216,6 +216,8 @@
     if (diag.pbFixed) h += 'Odtwarzanie: przepisane z Apple na Widevine (' + diag.pbFixed + ')<br>';
     if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
     if (diag.keys) h += 'Klucze po licencji: ' + esc(diag.keys) + '<br>';
+    if (diag.play) h += 'Obraz kanału: ' + esc(diag.play) + '<br>';
+    if (diag.noAudio) h += 'Próba bez dźwięku: ' + esc(diag.noAudio) + '<br>';
     var wv = null;
     try { wv = JSON.parse(localStorage.getItem('tvnav:wvres') || 'null'); } catch (e) { wv = null; }
     if (wv && wv.length) {
@@ -1459,17 +1461,69 @@
     }
   }
 
+  // ---------------------------------------------------------------- TEST: stan odtwarzacza strony i próba bez dźwięku
+  // Pokazuje, co się dzieje z obrazem kanału (czas, bufory obrazu i dźwięku, klatki). Jeśli 20 s po licencji
+  // obraz stoi, wczytuje kanał jeszcze raz bez dźwięku — żeby sprawdzić, czy to dźwięk blokuje odtwarzanie.
+  function sitePlayer(v) {
+    try { if (v && v.ui && v.ui.getControls) return v.ui.getControls().getPlayer(); } catch (e) { /* brak */ }
+    return null;
+  }
+  function bufAhead(ranges, t) {
+    if (!ranges || !ranges.length) return '0';
+    for (var i = 0; i < ranges.length; i++) if (ranges[i].end > t) return (ranges[i].end - Math.max(ranges[i].start, t)).toFixed(1);
+    return '0';
+  }
+  var pbw = { keysAt: 0, t0: 0, tried: false, triedAt: 0, tAtTry: null };
+  function watchPlayback() {
+    if (!isTvPage()) return;
+    var v = document.querySelector('video');
+    if (!v) return;
+    var p = sitePlayer(v), info = null, act = null, buffering = false, i;
+    try { info = p && p.getBufferedInfo(); } catch (e) { info = null; }
+    try { if (p) { var tr = p.getVariantTracks(); for (i = 0; i < tr.length; i++) if (tr[i].active) act = tr[i]; } } catch (e) { act = null; }
+    try { buffering = !!(p && p.isBuffering()); } catch (e) { buffering = false; }
+    var t = v.currentTime || 0;
+    diag.play = (v.paused ? 'pauza' : 'gra') + ', stan ' + v.readyState +
+      ', bufor obraz ' + bufAhead(info && info.video, t) + ' s, dźwięk ' + bufAhead(info && info.audio, t) + ' s' +
+      ', klatki ' + frameCount(v) + (buffering ? ', czeka na dane' : '') +
+      (act ? ', ' + (act.width || 0) + '×' + (act.height || 0) + ' ' + (act.videoCodec || '') + '/' + (act.audioCodec || '') : '') +
+      (p ? '' : ', brak dostępu do odtwarzacza');
+    if (diag.keys && diag.keys.indexOf('usable') >= 0 && !pbw.keysAt) { pbw.keysAt = Date.now(); pbw.t0 = t; }
+    if (pbw.keysAt) diag.play = 'czas +' + (t - pbw.t0).toFixed(1) + ' s, ' + diag.play;
+    if (p && pbw.keysAt && !pbw.tried && Date.now() - pbw.keysAt > 20000 && t - pbw.t0 < 1) {
+      pbw.tried = true;
+      pbw.triedAt = Date.now();
+      diag.noAudio = 'wczytuję kanał bez dźwięku…';
+      try {
+        p.configure({ manifest: { disableAudio: true } });
+        p.load(p.getAssetUri()).then(function () {
+          pbw.tAtTry = v.currentTime || 0;
+          try { var pr = v.play(); if (pr && pr['catch']) pr['catch'](function () { /* trudno */ }); } catch (e) { /* trudno */ }
+        }, function (e) { diag.noAudio = 'nie udało się: ' + (e && typeof e.code === 'number' ? shakaErr(e) : dErr(e)); });
+      } catch (e) { diag.noAudio = 'nie udało się: ' + dErr(e); }
+    }
+    if (pbw.tried && /wczytuję/.test(diag.noAudio || '') && Date.now() - pbw.triedAt > 15000) {
+      if (pbw.tAtTry === null) diag.noAudio = 'kanał się nie wczytał';
+      else {
+        var adv = (v.currentTime || 0) - pbw.tAtTry;
+        diag.noAudio = adv > 3 ? 'OBRAZ RUSZYŁ (+' + adv.toFixed(1) + ' s) — blokuje dźwięk' : 'obraz nadal stoi (+' + adv.toFixed(1) + ' s)';
+      }
+    }
+    renderDiag();
+  }
+
   // ---------------------------------------------------------------- TEST: przykładowe filmy z zabezpieczeniem i bez
   // Sprawdza, czy w TizenBrew w ogóle da się odtworzyć film z Widevine (publiczne filmy testowe Google i DASH-IF).
   // Wynik pokazuje, czy problem leży w kanałach serwisu, czy w samym środowisku TizenBrew.
   var TEST_PATH = '/tvnav-test';
+  var LIVE_CBCS = 'https://livesim2.dashif.org/livesim2/drm_EZDRM-1-key-cbcs/testpic_2s/Manifest.mpd';
+  var LIVE_CBCS_LIC = { 'com.widevine.alpha': 'https://widevine-dash.ezdrm.com/proxy?pX=3B0669' };
   var TESTS = [
-    { name: 'Plik MP4 bez MSE', progressive: 'https://www.w3schools.com/html/mov_bbb.mp4' },
-    { name: 'DASH bez zabezpieczeń, stała jakość, oryginalny opis', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', realUA: true, fixed: true },
-    { name: 'DASH bez zabezpieczeń, stała jakość, opis „Chrome”', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', fixed: true },
-    { name: 'DASH bez zabezpieczeń, zmienna jakość, oryginalny opis', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', realUA: true },
-    { name: 'Widevine cenc, stała jakość', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one-widevine/dash.mpd', drm: { 'com.widevine.alpha': 'https://proxy.uat.widevine.com/proxy' }, realUA: true, fixed: true },
-    { name: 'Widevine cbcs (jak w kanałach)', uri: 'https://livesim2.dashif.org/livesim2/drm_EZDRM-1-key-cbcs/testpic_2s/Manifest.mpd', drm: { 'com.widevine.alpha': 'https://widevine-dash.ezdrm.com/proxy?pX=3B0669' }, realUA: true, fixed: true }
+    { name: 'DASH bez zabezpieczeń', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', fixed: true },
+    { name: 'Widevine cenc', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one-widevine/dash.mpd', drm: { 'com.widevine.alpha': 'https://proxy.uat.widevine.com/proxy' }, fixed: true },
+    { name: 'Widevine cbcs (jak w kanałach)', uri: LIVE_CBCS, drm: LIVE_CBCS_LIC, fixed: true },
+    { name: 'Widevine cbcs, sam obraz (bez dźwięku)', uri: LIVE_CBCS, drm: LIVE_CBCS_LIC, fixed: true, noAudio: true },
+    { name: 'Widevine cbcs, sam dźwięk (bez obrazu)', uri: LIVE_CBCS, drm: LIVE_CBCS_LIC, noVideo: true }
   ];
   function frameCount(v) {
     try { var q = v.getVideoPlaybackQuality && v.getVideoPlaybackQuality(); if (q) return q.totalVideoFrames; } catch (e) { /* brak */ }
@@ -1532,6 +1586,7 @@
           player.attach(v).then(function () {
             var cfg = { drm: { servers: t.drm || {} } };
             if (t.fixed) cfg.abr = { enabled: false };
+            if (t.noAudio || t.noVideo) cfg.manifest = { disableAudio: !!t.noAudio, disableVideo: !!t.noVideo };
             player.configure(cfg);
             return player.load(t.uri);
           }).then(function () {
@@ -1558,7 +1613,7 @@
         clearInterval(iv);
         v.removeEventListener('error', onErr);
         var fr = frameCount(v);
-        var ok = st.dt > 3 && v.videoWidth > 0 && !st.err;
+        var ok = st.dt > 3 && (t.noVideo || v.videoWidth > 0) && !st.err;
         res[i] = (ok ? 'DZIAŁA' : (st.err || 'brak obrazu')) + ' (czas +' + st.dt.toFixed(1) + ' s, ' + v.videoWidth + '×' + v.videoHeight +
           (fr !== null ? ', klatki ' + fr : '') + ')';
         live = '';
@@ -1594,8 +1649,8 @@
     try { ['tvnav:robi', 'tvnav:robres', 'tvnav:robok'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { /* trudno */ }
     // jednorazowo: po zalogowaniu przejdź do testu odtwarzania
     try {
-      if (hasSession() && localStorage.getItem('tvnav:wvtest') !== '4') {
-        localStorage.setItem('tvnav:wvtest', '4');
+      if (hasSession() && localStorage.getItem('tvnav:wvtest') !== '5') {
+        localStorage.setItem('tvnav:wvtest', '5');
         location.replace(TEST_PATH);
         return;
       }
@@ -1612,6 +1667,7 @@
     state.session = hasSession();
     tick();
     setInterval(tick, 400);
+    setInterval(function () { try { watchPlayback(); } catch (e) { /* bez podglądu */ } }, 1000);
     window.__tvNav.state = state;
   }
 
