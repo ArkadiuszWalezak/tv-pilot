@@ -15,7 +15,53 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.16-test' };
+  window.__tvNav = { version: '1.0.17-test' };
+
+  // Wbudowana przeglądarka telewizora odtwarza zaszyfrowane kanały, a aplikacja nie. Dajemy aplikacji
+  // dokładnie ten sam opis (User-Agent) co przeglądarka — w ustawieniach TizenBrew, które obowiązują w całej
+  // aplikacji i przy każdym jej starcie. Ustawić go można tylko na stronie startowej TizenBrew, więc raz
+  // na chwilę tam wracamy (moduł jest tam też wczytywany) i zaraz wracamy na stronę.
+  var REAL_UA = navigator.userAgent;
+  function samsungBrowserUa(ua) {
+    var tz = /Tizen ([\d.]+)/.exec(ua), ch = /(\d+\.\d+\.\d+\.\d+)/.exec(ua);
+    if (!tz || !ch) return null;
+    return 'Mozilla/5.0 (SMART-TV; Linux; Tizen ' + tz[1] + ') AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/3.0 Chrome/' +
+      ch[1] + ' TV Safari/537.36';
+  }
+  var IS_SB = /SamsungBrowser/.test(REAL_UA);
+  if (typeof tizen !== 'undefined' && /tizenbrew-ui/.test(location.pathname)) {
+    try {
+      var sbUa = samsungBrowserUa(REAL_UA);
+      if (sbUa && !IS_SB) {
+        try { localStorage.setItem('userAgent', sbUa); } catch (e1) { /* TizenBrew ustawia go przy każdym starcie */ }
+        try { tizen.websetting.setUserAgentString(sbUa); } catch (e2) { /* od razu, w tej sesji */ }
+      }
+      var navE = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+      var cameBack = (navE && navE.type === 'back_forward') || (performance.navigation && performance.navigation.type === 2);
+      if (cameBack) setTimeout(function () { history.forward(); }, 800);
+    } catch (e) { /* zostaje dotychczasowy opis */ }
+    return;
+  }
+  (function switchToBrowserUa() {
+    if (IS_SB || !samsungBrowserUa(REAL_UA) || history.length < 2) return;
+    var last = 0;
+    try { last = Number(localStorage.getItem('tvnav:uaswitch') || 0); } catch (e) { last = 0; }
+    if (Date.now() - last < 10 * 60 * 1000) return; // najwyżej raz na 10 minut — bez zapętlenia
+    try { localStorage.setItem('tvnav:uaswitch', String(Date.now())); } catch (e) { return; }
+    var note = function () {
+      if (!document.body) { setTimeout(note, 100); return; }
+      var d = document.createElement('div');
+      d.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;background:#000;color:#fff;' +
+        'display:flex;align-items:center;justify-content:center;font:400 3.2vh/1.5 Arial,Helvetica,sans-serif;text-align:center;';
+      d.innerHTML = '<div><b style="color:#ffc400">Ustawiam aplikację tak jak przeglądarkę telewizora…</b><br>' +
+        'Ekran mignie i strona otworzy się ponownie. Nic nie naciskaj.</div>';
+      document.body.appendChild(d);
+    };
+    note();
+    setTimeout(function () { history.go(1 - history.length); }, 1500);
+  })();
+  // po powrocie z historii strona mogła zostać odtworzona z pamięci — wczytujemy ją od nowa
+  window.addEventListener('pageshow', function (e) { if (e.persisted) location.replace(location.href); });
   // strona testu odtwarzania: zatrzymujemy wczytywanie serwisu, żeby nic innego nie odtwarzało obrazu
   if (location.pathname === '/tvnav-test') { try { window.stop(); } catch (e) { /* trudno */ } }
 
@@ -211,7 +257,9 @@
     if (!ui.diag) return;
     var h = '<b>TEST DRM</b> (tv-pilot ' + esc(window.__tvNav.version) + (window.__tvNavFrom ? ', ' + esc(window.__tvNavFrom) : '') + ')<br>';
     h += 'Telewizor: ' + diag.order.map(function (k) { return esc(k) + ' ' + esc(diag.probes[k]); }).join(' · ') + '<br>';
-    if (diag.platform) h += 'Platforma dla serwera: ' + esc(diag.platform) + ' → ' + esc(PLATFORM) + '<br>';
+    h += 'Opis aplikacji: ' + (IS_SB ? 'jak wbudowana przeglądarka telewizora' : 'TizenBrew (przełączam na opis przeglądarki)') + '<br>';
+    if (diag.platform && PLATFORM) h += 'Platforma dla serwera: ' + esc(diag.platform) + ' → ' + esc(PLATFORM) + '<br>';
+    if (diag.mpd) h += 'Strumień kanału: ' + esc(diag.mpd) + '<br>';
     if (diag.chTotal !== undefined) h += 'Lista kanałów: ' + diag.chFixed + ' z ' + diag.chTotal + ' przepisane z Apple na Widevine' + (diag.origPl ? ' (pl=' + esc(diag.origPl) + ')' : '') + '<br>';
     if (diag.pbFixed) h += 'Odtwarzanie: przepisane z Apple na Widevine (' + diag.pbFixed + ')<br>';
     if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
@@ -294,9 +342,10 @@
   // Strona mówi serwerowi, na jakim systemie działa (nagłówek „Platform”), odczytując to z opisu przeglądarki.
   // Na telewizorze wychodzi „Unknown” i serwer daje wersję kanału dla Apple (FairPlay), której telewizor nie odtworzy.
   // Podajemy „Windows”, tak jak przeglądarka na komputerze, na którym kanały działają.
-  var PLATFORM = 'Windows';
+  // Z opisem przeglądarki Samsunga strona sama podaje to samo co przeglądarka — wtedy nic nie zmieniamy.
+  var PLATFORM = IS_SB ? null : 'Windows';
   function fixPlatformHeaders(h) {
-    if (!h || typeof h !== 'object') return h;
+    if (!PLATFORM || !h || typeof h !== 'object') return h;
     try {
       if (window.Headers && h instanceof Headers) {
         var v = h.get('Platform');
@@ -456,6 +505,18 @@
     });
   }
 
+  // rodzaj szyfrowania i systemy DRM w manifeście kanału (cenc/cbcs, Widevine/PlayReady)
+  function noteMpd(t) {
+    t = String(t || '');
+    var sch = (/mp4protection:2011"[^>]*value="(\w+)"|value="(\w+)"[^>]*mp4protection:2011"/.exec(t) || []);
+    var scheme = sch[1] || sch[2] || (/<ContentProtection/i.test(t) ? '?' : 'bez szyfrowania');
+    var sys = [];
+    if (/edef8ba9-79d6-4ace-a3c8-27dcd51d21ed/i.test(t)) sys.push('Widevine');
+    if (/9a04f079-9840-4286-ab92-e65be0885f95/i.test(t)) sys.push('PlayReady');
+    var s = 'DASH, ' + scheme + (sys.length ? ' (' + sys.join(', ') + ')' : '');
+    if (diag.mpd !== s) { diag.mpd = s; renderDiag(); }
+  }
+
   function watchNet() {
     var of = window.fetch;
     if (of && !of.__tvnav) {
@@ -477,6 +538,7 @@
         var bare = String(url).split('#')[0].split('?')[0];
         if (/\/channels$/.test(bare) && String(method).toUpperCase() === 'GET') p = p.then(fixChannelsResponse);
         else if (/playbackUrl$/i.test(bare)) p = p.then(fixPlaybackResponse);
+        else if (/\.mpd$/i.test(bare)) p.then(function (res) { try { res.clone().text().then(noteMpd, function () { /* trudno */ }); } catch (e) { /* trudno */ } }, function () { /* trudno */ });
         if (tag) {
           p.then(function (res) {
             var line = tag + ' → ' + res.status;
@@ -506,7 +568,7 @@
       var xh = X.setRequestHeader;
       if (xh) {
         X.setRequestHeader = function (name, value) {
-          if (String(name).toLowerCase() === 'platform' && value !== PLATFORM) {
+          if (PLATFORM && String(name).toLowerCase() === 'platform' && value !== PLATFORM) {
             if (!diag.platform) diag.platform = String(value);
             return xh.call(this, name, PLATFORM);
           }
