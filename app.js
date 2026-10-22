@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.11-test' };
+  window.__tvNav = { version: '1.0.12-test' };
   // strona testu odtwarzania: zatrzymujemy wczytywanie serwisu, żeby nic innego nie odtwarzało obrazu
   if (location.pathname === '/tvnav-test') { try { window.stop(); } catch (e) { /* trudno */ } }
 
@@ -1459,7 +1459,7 @@
   // Wynik pokazuje, czy problem leży w kanałach serwisu, czy w samym środowisku TizenBrew.
   var TEST_PATH = '/tvnav-test';
   var TESTS = [
-    { name: 'Plik MP4 bez MSE', progressive: 'https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4' },
+    { name: 'Plik MP4 bez MSE', progressive: 'https://www.w3schools.com/html/mov_bbb.mp4' },
     { name: 'DASH bez zabezpieczeń, stała jakość, oryginalny opis', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', realUA: true, fixed: true },
     { name: 'DASH bez zabezpieczeń, stała jakość, opis „Chrome”', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', fixed: true },
     { name: 'DASH bez zabezpieczeń, zmienna jakość, oryginalny opis', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', realUA: true },
@@ -1586,8 +1586,8 @@
     try { ['tvnav:robi', 'tvnav:robres', 'tvnav:robok'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { /* trudno */ }
     // jednorazowo: po zalogowaniu przejdź do testu odtwarzania
     try {
-      if (hasSession() && localStorage.getItem('tvnav:wvtest') !== '2') {
-        localStorage.setItem('tvnav:wvtest', '2');
+      if (hasSession() && localStorage.getItem('tvnav:wvtest') !== '3') {
+        localStorage.setItem('tvnav:wvtest', '3');
         location.replace(TEST_PATH);
         return;
       }
