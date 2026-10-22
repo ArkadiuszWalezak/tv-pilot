@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.5-test' };
+  window.__tvNav = { version: '1.0.6-test' };
 
   // Przeglądarka aplikacji na telewizorze przedstawia się bez słowa „Chrome”, więc strona bierze ją za Safari
   // i wybiera zabezpieczenie Apple (FairPlay), którego telewizor nie ma. Dopisujemy „Chrome/wersja”,
@@ -122,7 +122,7 @@
     'border:4px solid #ffc400;border-radius:12px;box-shadow:0 0 0 3px rgba(0,0,0,.55),0 0 26px rgba(255,196,0,.65);display:none;',
     'transition:left .12s ease-out,top .12s ease-out,width .12s ease-out,height .12s ease-out;}',
 
-    'html.tvnav-full,html.tvnav-full body{overflow:hidden!important;}',
+    'html.tvnav-full,html.tvnav-full body{overflow:hidden!important;background:#000!important;}',
     'html.tvnav-full .tvnav-raise{z-index:2147483000!important;}',
     'html.tvnav-full .tvnav-player{position:fixed!important;left:0!important;top:0!important;right:auto!important;bottom:auto!important;',
     'width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;margin:0!important;',
@@ -208,6 +208,7 @@
     if (!ui.diag) return;
     var h = '<b>TEST DRM</b> (tv-pilot ' + esc(window.__tvNav.version) + (window.__tvNavFrom ? ', ' + esc(window.__tvNavFrom) : '') + ')<br>';
     h += 'Telewizor: ' + diag.order.map(function (k) { return esc(k) + ' ' + esc(diag.probes[k]); }).join(' · ') + '<br>';
+    if (diag.platform) h += 'Platforma dla serwera: ' + esc(diag.platform) + ' → ' + esc(PLATFORM) + '<br>';
     if (diag.encrypted) h += 'Obraz zaszyfrowany: tak (' + esc(diag.encrypted) + ')<br>';
     var asked = Object.keys(diag.mcap).map(function (k) { return esc(k) + ' → ' + esc(diag.mcap[k]); });
     diag.calls.forEach(function (c) { asked.push(esc(c.ks) + ' → ' + esc(c.res)); });
@@ -252,15 +253,57 @@
   }
 
   // adres bez parametrów (mogą w nich być tokeny) — sam serwer i ścieżka
+  function shortUrl(url) {
+    url = String(url || '');
+    var host = '', p = url.split('?')[0];
+    try { var u = new URL(url, location.href); host = u.host; p = u.pathname; } catch (e) { host = ''; }
+    return host + dShort(p, 45);
+  }
   function netTag(url, method, body) {
     url = String(url || '');
     method = String(method || 'GET').toUpperCase();
+    // pomijamy kawałki obrazu i listy odtwarzania — rodzaj strumienia widać w odpowiedzi „playbackUrl”
+    if (/\.(m4s|ts|mp4|m4a|m4v|aac|vtt|m3u8|mpd)(\?|$)/i.test(url.split('#')[0])) return '';
     var bin = body && typeof body !== 'string' && !(window.URLSearchParams && body instanceof URLSearchParams) &&
       !(window.FormData && body instanceof FormData);
-    if (!(/cid=|licen|drm|widevine|preauth/i.test(url) || (method === 'POST' && bin))) return '';
-    var host = url, p = url.split('?')[0];
-    try { var u = new URL(url, location.href); host = u.host; p = u.pathname; } catch (e) { host = ''; }
-    return method + ' ' + host + dShort(p, 45) + (/cid=/.test(url) ? ' (przed licencją)' : '');
+    var preauth = /[?&]cid=[^&]*&type=/i.test(url);
+    if (!(preauth || /playbackUrl|licen|drm|widevine|preauth/i.test(url) || (method === 'POST' && bin))) return '';
+    return method + ' ' + shortUrl(url) + (preauth ? ' (przed licencją)' : '');
+  }
+  // co serwer przydzielił: rodzaj zabezpieczenia, adres licencji i rodzaj strumienia (bez tokenów)
+  function playbackSummary(j) {
+    var d = (j && j.drmInfo) || {};
+    var uri = String((j && j.uri) || '').split('?')[0];
+    var kind = /\.mpd$/i.test(uri) ? 'DASH' : /\.m3u8$/i.test(uri) ? 'HLS' : (uri ? '?' : '-');
+    return 'drm=' + (d.drmType || '-') + ', licencja=' + (d.licenseProxyUri ? shortUrl(d.licenseProxyUri) : '-') + ', strumień=' + kind;
+  }
+
+  // Strona mówi serwerowi, na jakim systemie działa (nagłówek „Platform”), odczytując to z opisu przeglądarki.
+  // Na telewizorze wychodzi „Unknown” i serwer daje wersję kanału dla Apple (FairPlay), której telewizor nie odtworzy.
+  // Podajemy „Windows”, tak jak przeglądarka na komputerze, na którym kanały działają.
+  var PLATFORM = 'Windows';
+  function fixPlatformHeaders(h) {
+    if (!h || typeof h !== 'object') return h;
+    try {
+      if (window.Headers && h instanceof Headers) {
+        var v = h.get('Platform');
+        if (v === null || v === PLATFORM) return h;
+        if (!diag.platform) { diag.platform = v; renderDiag(); }
+        var c = new Headers(h);
+        c.set('Platform', PLATFORM);
+        return c;
+      }
+      for (var k in h) {
+        if (Object.prototype.hasOwnProperty.call(h, k) && k.toLowerCase() === 'platform' && h[k] !== PLATFORM) {
+          if (!diag.platform) { diag.platform = String(h[k]); renderDiag(); }
+          var o = {};
+          for (var j in h) if (Object.prototype.hasOwnProperty.call(h, j)) o[j] = h[j];
+          o[k] = PLATFORM;
+          return o;
+        }
+      }
+    } catch (e) { /* zostawiamy nagłówki strony */ }
+    return h;
   }
   function bodySnippet(text) { return text ? ' ' + dShort(dFlat(text), 90) : ''; }
   function headerSnippet(get) {
@@ -278,13 +321,28 @@
       var wf = function (input, init) {
         var url = typeof input === 'string' ? input : (input && input.url) || '';
         var method = (init && init.method) || (input && typeof input === 'object' && input.method) || 'GET';
-        var tag = '';
+        var tag = '', args = arguments;
         try { tag = netTag(url, method, init && init.body); } catch (e) { tag = ''; }
-        var p = of.apply(window, arguments);
+        if (init && init.headers) {
+          var nh = fixPlatformHeaders(init.headers);
+          if (nh !== init.headers) {
+            var ni = {};
+            for (var k in init) ni[k] = init[k];
+            ni.headers = nh;
+            args = [input, ni];
+          }
+        }
+        var p = of.apply(window, args);
         if (tag) {
           p.then(function (res) {
             var line = tag + ' → ' + res.status;
             var hs = headerSnippet(function (k) { try { return res.headers.get(k); } catch (e) { return null; } });
+            if (res.ok && /playbackUrl/i.test(url)) {
+              try {
+                res.clone().json().then(function (j) { netNote(line + ': ' + playbackSummary(j)); }, function () { netNote(line + ' OK'); });
+              } catch (e) { netNote(line + ' OK'); }
+              return;
+            }
             if (res.ok) { netNote(line + ' OK' + hs); return; }
             try {
               res.clone().text().then(function (t) { netNote(line + hs + bodySnippet(t)); }, function () { netNote(line + hs); });
@@ -301,6 +359,16 @@
       var xo = X.open, xs = X.send;
       X.open = function (m, u) { this.__tvm = m; this.__tvu = u; return xo.apply(this, arguments); };
       X.open.__tvnav = true;
+      var xh = X.setRequestHeader;
+      if (xh) {
+        X.setRequestHeader = function (name, value) {
+          if (String(name).toLowerCase() === 'platform' && value !== PLATFORM) {
+            if (!diag.platform) diag.platform = String(value);
+            return xh.call(this, name, PLATFORM);
+          }
+          return xh.apply(this, arguments);
+        };
+      }
       X.send = function (body) {
         var x = this, tag = '';
         try { tag = netTag(x.__tvu, x.__tvm, body); } catch (e) { tag = ''; }
