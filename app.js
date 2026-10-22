@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.10-test' };
+  window.__tvNav = { version: '1.0.11-test' };
   // strona testu odtwarzania: zatrzymujemy wczytywanie serwisu, żeby nic innego nie odtwarzało obrazu
   if (location.pathname === '/tvnav-test') { try { window.stop(); } catch (e) { /* trudno */ } }
 
@@ -29,7 +29,8 @@
       var m = /(\d+\.\d+\.\d+\.\d+)/.exec(ua);
       var fixed = ua.replace(/ ((?:TV )?Safari\/)/, ' Chrome/' + (m ? m[1] : '94.0.0.0') + ' $1');
       if (fixed === ua) return;
-      Object.defineProperty(navigator, 'userAgent', { get: function () { return fixed; }, configurable: true });
+      // window.__tvnavRealUA = true przywraca oryginalny opis (używane w teście odtwarzania)
+      Object.defineProperty(navigator, 'userAgent', { get: function () { return window.__tvnavRealUA ? ua : fixed; }, configurable: true });
     } catch (e) { /* nie udało się — zostaje oryginalny */ }
   })();
 
@@ -1458,9 +1459,12 @@
   // Wynik pokazuje, czy problem leży w kanałach serwisu, czy w samym środowisku TizenBrew.
   var TEST_PATH = '/tvnav-test';
   var TESTS = [
-    { name: 'Film bez zabezpieczeń', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', drm: null },
-    { name: 'Widevine cenc', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one-widevine/dash.mpd', drm: { 'com.widevine.alpha': 'https://proxy.uat.widevine.com/proxy' } },
-    { name: 'Widevine cbcs (jak w kanałach)', uri: 'https://livesim2.dashif.org/livesim2/drm_EZDRM-1-key-cbcs/testpic_2s/Manifest.mpd', drm: { 'com.widevine.alpha': 'https://widevine-dash.ezdrm.com/proxy?pX=3B0669' } }
+    { name: 'Plik MP4 bez MSE', progressive: 'https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4' },
+    { name: 'DASH bez zabezpieczeń, stała jakość, oryginalny opis', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', realUA: true, fixed: true },
+    { name: 'DASH bez zabezpieczeń, stała jakość, opis „Chrome”', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', fixed: true },
+    { name: 'DASH bez zabezpieczeń, zmienna jakość, oryginalny opis', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd', realUA: true },
+    { name: 'Widevine cenc, stała jakość', uri: 'https://storage.googleapis.com/shaka-demo-assets/angel-one-widevine/dash.mpd', drm: { 'com.widevine.alpha': 'https://proxy.uat.widevine.com/proxy' }, realUA: true, fixed: true },
+    { name: 'Widevine cbcs (jak w kanałach)', uri: 'https://livesim2.dashif.org/livesim2/drm_EZDRM-1-key-cbcs/testpic_2s/Manifest.mpd', drm: { 'com.widevine.alpha': 'https://widevine-dash.ezdrm.com/proxy?pX=3B0669' }, realUA: true, fixed: true }
   ];
   function frameCount(v) {
     try { var q = v.getVideoPlaybackQuality && v.getVideoPlaybackQuality(); if (q) return q.totalVideoFrames; } catch (e) { /* brak */ }
@@ -1471,25 +1475,29 @@
     var box = document.createElement('div');
     box.id = 'tvnav-wvtest';
     box.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483600;background:#000;color:#fff;' +
-      'font:400 2.6vh/1.45 Arial,Helvetica,sans-serif;';
-    var vid = document.createElement('video');
-    vid.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;';
-    vid.autoplay = true;
+      'font:400 2.3vh/1.4 Arial,Helvetica,sans-serif;';
     var info = document.createElement('div');
-    info.style.cssText = 'position:absolute;left:3vw;bottom:4vh;max-width:75vw;background:rgba(0,0,0,.82);' +
-      'border:3px solid #ffc400;border-radius:12px;padding:1.6vh 1.6vw;';
-    box.appendChild(vid);
+    info.style.cssText = 'position:absolute;left:3vw;bottom:3vh;max-width:90vw;background:rgba(0,0,0,.82);' +
+      'border:3px solid #ffc400;border-radius:12px;padding:1.4vh 1.4vw;z-index:2;';
     box.appendChild(info);
     document.body.appendChild(box);
-    var res = [], live = '';
+    var vid = null, res = [], live = '', extra = '';
+    function newVideo() {
+      if (vid && vid.parentNode) vid.parentNode.removeChild(vid);
+      vid = document.createElement('video');
+      vid.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;z-index:1;';
+      vid.autoplay = true;
+      box.insertBefore(vid, info);
+      return vid;
+    }
     function render() {
-      var h = '<b style="color:#ffc400">TEST ODTWARZANIA</b> (tv-pilot ' + esc(window.__tvNav.version) + ')<br>';
+      var h = '<b style="color:#ffc400">TEST ODTWARZANIA</b> (tv-pilot ' + esc(window.__tvNav.version) + ')' + (extra ? ' · ' + esc(extra) : '') + '<br>';
       for (var i = 0; i < TESTS.length; i++) h += (i + 1) + '. ' + esc(TESTS[i].name) + ': ' + esc(res[i] || (live && i === res.length ? 'sprawdzam…' : '–')) + '<br>';
       if (live && !finished) h += '<span style="opacity:.75">' + esc(live) + '</span><br>';
       if (finished) h += '<b>Gotowe. Zrób zdjęcie, potem naciśnij OK, aby wrócić do telewizji.</b>';
       info.innerHTML = h;
     }
-    function back() { location.replace('/tv'); }
+    function back() { window.__tvnavRealUA = false; location.replace('/tv'); }
     window.addEventListener('keydown', function (e) {
       var k = e.keyCode;
       if (k === 13 || k === 10009 || k === 8 || k === 27) {
@@ -1499,40 +1507,61 @@
       }
     }, true);
     function runClip(i) {
-      if (i >= TESTS.length) { finished = true; render(); return; }
-      var t = TESTS[i], st = { start: null, dt: 0, err: '' }, t0 = Date.now(), player;
-      var onErr = function () { if (vid.error) st.err = 'błąd odtwarzacza ' + vid.error.code + (vid.error.code === 3 ? ' (dekodowanie)' : ''); };
-      vid.addEventListener('error', onErr);
+      if (i >= TESTS.length) { window.__tvnavRealUA = false; finished = true; render(); return; }
+      var t = TESTS[i], st = { start: null, dt: 0, err: '' }, t0 = Date.now(), player = null;
+      window.__tvnavRealUA = !!t.realUA;
+      var v = newVideo();
+      var onErr = function () { if (v.error) st.err = 'błąd odtwarzacza ' + v.error.code + (v.error.code === 3 ? ' (dekodowanie)' : ''); };
+      v.addEventListener('error', onErr);
+      var playNow = function () {
+        try { var pr = v.play(); if (pr && pr['catch']) pr['catch'](function () { /* autoodtwarzanie */ }); } catch (e) { /* trudno */ }
+      };
       try {
-        player = new shaka.Player();
-        player.addEventListener('error', function (ev) { if (!st.err) st.err = shakaErr(ev.detail || {}); });
-        player.attach(vid).then(function () {
-          player.configure({ drm: { servers: t.drm || {} } });
-          return player.load(t.uri);
-        }).then(function () {
-          try { var pr = vid.play(); if (pr && pr['catch']) pr['catch'](function () { /* autoodtwarzanie */ }); } catch (e) { /* trudno */ }
-        }, function (e) { if (!st.err) st.err = e && typeof e.code === 'number' ? shakaErr(e) : dErr(e); });
+        if (t.progressive) {
+          v.src = t.progressive;
+          playNow();
+        } else {
+          player = new shaka.Player();
+          player.addEventListener('error', function (ev) { if (!st.err) st.err = shakaErr(ev.detail || {}); });
+          player.attach(v).then(function () {
+            var cfg = { drm: { servers: t.drm || {} } };
+            if (t.fixed) cfg.abr = { enabled: false };
+            player.configure(cfg);
+            return player.load(t.uri);
+          }).then(function () {
+            if (t.fixed) {
+              try {
+                var tr = player.getVariantTracks().slice().sort(function (a, b) { return a.bandwidth - b.bandwidth; });
+                if (tr.length) player.selectVariantTrack(tr[0], true);
+              } catch (e) { /* zostaje domyślna */ }
+            }
+            playNow();
+          }, function (e) { if (!st.err) st.err = e && typeof e.code === 'number' ? shakaErr(e) : dErr(e); });
+        }
       } catch (e) { st.err = dErr(e); }
       var iv = setInterval(function () {
-        // gdyby serwis jednak coś odtwarzał — zatrzymujemy, żeby nie zajmował dekodera
-        var others = document.querySelectorAll('video');
-        for (var o = 0; o < others.length; o++) if (others[o] !== vid) { try { others[o].pause(); others[o].muted = true; } catch (e) { /* trudno */ } }
-        if (st.start === null && vid.currentTime > 0) st.start = vid.currentTime;
-        if (st.start !== null) st.dt = Math.max(st.dt, vid.currentTime - st.start);
+        var others = document.querySelectorAll('video'), n = 0;
+        for (var o = 0; o < others.length; o++) if (others[o] !== v) { n++; try { others[o].pause(); others[o].muted = true; } catch (e) { /* trudno */ } }
+        extra = 'inne filmy na stronie: ' + n;
+        if (st.start === null && v.currentTime > 0) st.start = v.currentTime;
+        if (st.start !== null) st.dt = Math.max(st.dt, v.currentTime - st.start);
         var secs = Math.round((Date.now() - t0) / 1000);
-        live = t.name + ': ' + secs + ' s, czas filmu +' + st.dt.toFixed(1) + ' s, obraz ' + vid.videoWidth + '×' + vid.videoHeight + (st.err ? ', ' + st.err : '');
+        live = t.name + ': ' + secs + ' s, czas filmu +' + st.dt.toFixed(1) + ' s, obraz ' + v.videoWidth + '×' + v.videoHeight + (st.err ? ', ' + st.err : '');
         render();
-        if (!(Date.now() - t0 > 25000 || (st.err && Date.now() - t0 > 4000) || st.dt > 8)) return;
+        if (!(Date.now() - t0 > 22000 || (st.err && Date.now() - t0 > 4000) || st.dt > 8)) return;
         clearInterval(iv);
-        vid.removeEventListener('error', onErr);
-        var fr = frameCount(vid);
-        var ok = st.dt > 3 && vid.videoWidth > 0 && !st.err;
-        res[i] = (ok ? 'DZIAŁA' : (st.err || 'brak obrazu')) + ' (czas +' + st.dt.toFixed(1) + ' s, ' + vid.videoWidth + '×' + vid.videoHeight +
+        v.removeEventListener('error', onErr);
+        var fr = frameCount(v);
+        var ok = st.dt > 3 && v.videoWidth > 0 && !st.err;
+        res[i] = (ok ? 'DZIAŁA' : (st.err || 'brak obrazu')) + ' (czas +' + st.dt.toFixed(1) + ' s, ' + v.videoWidth + '×' + v.videoHeight +
           (fr !== null ? ', klatki ' + fr : '') + ')';
         live = '';
         render();
-        var next = function () { setTimeout(function () { runClip(i + 1); }, 1000); };
-        try { player.destroy().then(next, next); } catch (e) { next(); }
+        var next = function () {
+          try { v.removeAttribute('src'); v.load(); } catch (e) { /* trudno */ }
+          setTimeout(function () { runClip(i + 1); }, 1500);
+        };
+        if (player) { try { player.destroy().then(next, next); } catch (e) { next(); } } else next();
       }, 500);
     }
     render();
@@ -1557,8 +1586,8 @@
     try { ['tvnav:robi', 'tvnav:robres', 'tvnav:robok'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { /* trudno */ }
     // jednorazowo: po zalogowaniu przejdź do testu odtwarzania
     try {
-      if (hasSession() && localStorage.getItem('tvnav:wvtest') !== '1') {
-        localStorage.setItem('tvnav:wvtest', '1');
+      if (hasSession() && localStorage.getItem('tvnav:wvtest') !== '2') {
+        localStorage.setItem('tvnav:wvtest', '2');
         location.replace(TEST_PATH);
         return;
       }
