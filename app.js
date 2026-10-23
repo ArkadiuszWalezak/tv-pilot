@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.20' };
+  window.__tvNav = { version: '1.0.21' };
 
   // Wbudowana przeglądarka telewizora odtwarza zaszyfrowane kanały, a aplikacja nie. Dajemy aplikacji
   // dokładnie ten sam opis (User-Agent) co przeglądarka — w ustawieniach TizenBrew, które obowiązują w całej
@@ -309,24 +309,35 @@
   // Ten telewizor nie odtwarza w aplikacjach zaszyfrowanego dźwięku (cbcs), a próba potrafi zawiesić dekoder
   // aż do restartu. Dlatego zaszyfrowanych kanałów w ogóle nie uruchamiamy — działają w przeglądarce telewizora.
   var ENC_MSG = 'Ten kanał jest zaszyfrowany — na tym telewizorze działa tylko w przeglądarce telewizora';
-  var enc = { nums: load('tvnav:encnums', {}), names: load('tvnav:encnames', {}) };
+  var enc = { nums: load('tvnav:encnums', {}), names: load('tvnav:encnames', {}), clear: load('tvnav:clearnums', {}) };
   function normName(n) { return String(n || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
   function noteChannelList(list) {
-    var nums = {}, names = {}, k = 0;
-    for (var i = 0; i < list.length; i++) {
-      var c = list[i];
-      if (!c || !c.drm) continue; // 0 / brak = bez szyfrowania
-      if (c.lcn !== undefined && c.lcn !== null) nums[c.lcn] = 1;
+    var nums = {}, names = {}, clearNums = {}, clearNames = {}, k = 0, i, c;
+    for (i = 0; i < list.length; i++) {
+      c = list[i];
+      // strona pokazuje tylko kanały internetowe (origin 2); inne wpisy mogą mieć ten sam numer lub nazwę
+      if (!c || (c.origin !== undefined && c.origin !== null && c.origin !== 2)) continue;
+      var hasNum = c.lcn !== undefined && c.lcn !== null;
+      if (!c.drm) { // 0 / brak = bez szyfrowania
+        if (hasNum) clearNums[c.lcn] = 1;
+        if (c.name) clearNames[normName(c.name)] = 1;
+        continue;
+      }
+      if (hasNum) nums[c.lcn] = 1;
       if (c.name) names[normName(c.name)] = 1;
       k++;
     }
-    enc.nums = nums; enc.names = names;
-    save('tvnav:encnums', nums); save('tvnav:encnames', names);
+    // gdy ten sam numer lub nazwa występuje też bez szyfrowania — kanał uznajemy za działający
+    for (var n1 in clearNums) delete nums[n1];
+    for (var n2 in clearNames) delete names[n2];
+    enc.nums = nums; enc.names = names; enc.clear = clearNums;
+    save('tvnav:encnums', nums); save('tvnav:encnames', names); save('tvnav:clearnums', clearNums);
     diag.chEnc = k;
   }
   function isEncrypted(ch) {
     if (!ch) return false;
     if (enc.nums[ch.num]) return true;
+    if (enc.clear && enc.clear[ch.num]) return false;
     return !!enc.names[normName(ch.name)];
   }
   function dShort(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + '…' : s; }
