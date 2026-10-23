@@ -15,7 +15,7 @@
 (function () {
   'use strict';
   if (window.__tvNav) return;
-  window.__tvNav = { version: '1.0.21' };
+  window.__tvNav = { version: '1.1.0' };
 
   // Wbudowana przeglądarka telewizora odtwarza zaszyfrowane kanały, a aplikacja nie. Dajemy aplikacji
   // dokładnie ten sam opis (User-Agent) co przeglądarka — w ustawieniach TizenBrew, które obowiązują w całej
@@ -38,7 +38,11 @@
       if (sbUa && !IS_SB) {
         try { localStorage.setItem('userAgent', sbUa); stored = 'tak'; } catch (e1) { stored = 'błąd'; }
       }
-      if (!cameBack) return; // zwykłe otwarcie menu TizenBrew — nic więcej nie robimy
+      // polecenie z ekranu startowego dodatku (przekazane w nazwie okna, bo strony mają osobne pamięci)
+      var go = '';
+      try { if (/^tvnav-go:/.test(window.name)) { go = window.name.slice(9); window.name = ''; } } catch (e0) { go = ''; }
+      if (go && go !== 'ua') { tbLaunch(go); return; }
+      if (!cameBack || go !== 'ua') return; // zwykłe otwarcie menu TizenBrew — nic więcej nie robimy
       var done = false;
       // wracamy na stronę serwisu (adres z package.json modułu) z informacją, co się udało
       var back = function (msg) {
@@ -62,6 +66,56 @@
       setTimeout(function () { back('ustawienia nie odpowiedziały'); }, 4000);
     })();
     return;
+  }
+
+  // Strona startowa TizenBrew: uruchamia moduł wybrany na ekranie „Co oglądamy?” i ustawia, żeby
+  // TizenBrew po włączeniu od razu otwierał Telewizję (z ekranem wyboru).
+  function tbLaunch(go) {
+    var box = null, tries = 0;
+    var say = function (msg, ms) {
+      if (!document.body) { setTimeout(function () { say(msg, ms); }, 100); return; }
+      if (!box) {
+        box = document.createElement('div');
+        box.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;background:#0b0f17;color:#fff;' +
+          'display:flex;align-items:center;justify-content:center;font:400 3.4vh/1.5 Arial,Helvetica,sans-serif;text-align:center;';
+        document.body.appendChild(box);
+      }
+      box.textContent = msg;
+      if (ms) setTimeout(function () { if (box && box.parentNode) box.parentNode.removeChild(box); }, ms);
+    };
+    var label = go === 'youtube' ? 'YouTube' : go === 'tv' ? 'Telewizję' : '';
+    if (label) say('Otwieram ' + label + '…');
+    var isSelf = function (m) { return /tv-pilot/i.test(m.fullName || ''); };
+    (function wait() {
+      var st = window.state, cl = st && st.client, mods = st && st.sharedData && st.sharedData.modules;
+      if (!cl || !cl.modulesLoaded || !mods || !cl.socket || cl.socket.readyState !== 1) {
+        if (++tries < 100) { setTimeout(wait, 200); return; }
+        if (label) say('TizenBrew nie odpowiada — wybierz moduł z listy.', 4000);
+        return;
+      }
+      var i, self = null, target = null;
+      for (i = 0; i < mods.length; i++) if (isSelf(mods[i])) self = mods[i];
+      try {
+        if (self && !localStorage.getItem('tvnav:autolaunch')) {
+          cl.send({ type: 10, payload: { action: 'autolaunch', module: self.fullName } });
+          localStorage.setItem('tvnav:autolaunch', '1');
+        }
+      } catch (e) { /* bez autostartu */ }
+      if (go === 'tv') target = self;
+      else if (go === 'youtube') {
+        for (i = 0; i < mods.length; i++) {
+          if (!isSelf(mods[i]) && /tizentube|youtube/i.test((mods[i].fullName || '') + ' ' + (mods[i].appName || ''))) { target = mods[i]; break; }
+        }
+      }
+      if (!target) {
+        if (go === 'youtube') say('Nie znalazłem w TizenBrew modułu YouTube (TizenTube).', 4000);
+        else if (box && box.parentNode) box.parentNode.removeChild(box);
+        return;
+      }
+      try { for (i = 0; i < (target.keys || []).length; i++) { try { tizen.tvinputdevice.registerKey(target.keys[i]); } catch (e1) { /* trudno */ } } } catch (e2) { /* trudno */ }
+      cl.send({ type: 5, payload: target });
+      if (!target.evaluateScriptOnDocumentStart) location.href = target.appPath;
+    })();
   }
   var uaInfo = { action: '', hist: history.length, tz: typeof tizen, ws: 'nie', start: '' };
   try {
@@ -108,7 +162,7 @@
       document.body.appendChild(d);
     };
     note();
-    setTimeout(function () { history.go(1 - history.length); }, 1500);
+    setTimeout(function () { try { window.name = 'tvnav-go:ua'; } catch (e) { /* trudno */ } history.go(1 - history.length); }, 1500);
   })();
   // po powrocie z historii strona mogła zostać odtworzona z pamięci — wczytujemy ją od nowa
   window.addEventListener('pageshow', function (e) { if (e.persisted) location.replace(location.href); });
@@ -1588,6 +1642,7 @@
 
   function onKey(e) {
     if (!e.isTrusted) return; // zdarzenia wysyłane przez sam skrypt przepuszczamy
+    if (LAUNCH.open) { launcherKey(e); return; }
     var c = e.keyCode, d = digitOf(e);
     var active = document.activeElement;
 
@@ -1601,6 +1656,140 @@
     if (d !== null) { digit(d); stop(e); return; }
     if (state.full) { fullKey(e, c); return; }
     pageKey(e, c);
+  }
+
+  // ---------------------------------------------------------------- ekran startowy „Co oglądamy?”
+  // Pokazuje się raz po uruchomieniu TizenBrew (tylko w TizenBrew — ładowarka ustawia __tvNavLoader).
+  // YouTube i menu TizenBrew otwieramy przez stronę startową TizenBrew (tylko tam można uruchomić inny moduł).
+  var LAUNCH = { open: false, sel: 0, el: null, timer: null, busy: false };
+  var SVG = {
+    tv: '<svg viewBox="0 0 48 48"><rect x="5" y="10" width="38" height="25" rx="4" fill="none" stroke="currentColor" stroke-width="3.5"/>' +
+      '<path d="M16 42h16M24 35v7" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/>' +
+      '<path d="M17 4l7 6 7-6" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    youtube: '<svg viewBox="0 0 48 48"><circle cx="24" cy="24" r="18" fill="none" stroke="currentColor" stroke-width="3.5"/><path d="M20 16l12 8-12 8z" fill="currentColor"/></svg>',
+    menu: '<svg viewBox="0 0 48 48"><circle cx="24" cy="24" r="7" fill="none" stroke="currentColor" stroke-width="3.5"/>' +
+      '<path d="M24 5v7M24 36v7M5 24h7M36 24h7M10.6 10.6l5 5M32.4 32.4l5 5M10.6 37.4l5-5M32.4 15.6l5-5" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/></svg>'
+  };
+  var TILES = [
+    { id: 'tv', name: 'Telewizja', sub: 'Kanały na żywo', color: '#ffc400' },
+    { id: 'youtube', name: 'YouTube', sub: 'Bez reklam', color: '#ff4e45' },
+    { id: 'menu', name: 'TizenBrew', sub: 'Moduły i ustawienia', color: '#8fa8ff' }
+  ];
+  var LAUNCH_CSS = [
+    '#tvnav-launch{position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;color:#fff;font-family:Arial,Helvetica,sans-serif;',
+    'background:radial-gradient(ellipse at 50% 0%,#1c2a4a 0%,#0b0f17 62%);display:flex;flex-direction:column;align-items:center;}',
+    '#tvnav-launch .tl-top{align-self:stretch;display:flex;justify-content:space-between;padding:5vh 5vw 0;font-size:2.8vh;opacity:.8;}',
+    '#tvnav-launch .tl-clock{font-size:4.2vh;font-weight:700;opacity:1;}',
+    '#tvnav-launch h1{margin:9vh 0 7vh;font-size:7vh;font-weight:700;letter-spacing:.05vw;}',
+    '#tvnav-launch .tl-row{display:flex;}',
+    '#tvnav-launch .tl-tile{width:21vw;height:31vh;margin:0 1.6vw;border-radius:2.6vh;background:rgba(255,255,255,.06);',
+    'border:.5vh solid transparent;display:flex;flex-direction:column;align-items:center;justify-content:center;box-sizing:border-box;',
+    'transition:transform .15s ease-out,background .15s ease-out,box-shadow .15s ease-out;}',
+    '#tvnav-launch .tl-tile svg{width:11vh;height:11vh;margin-bottom:3vh;}',
+    '#tvnav-launch .tl-name{font-size:4.2vh;font-weight:700;}',
+    '#tvnav-launch .tl-sub{font-size:2.5vh;margin-top:1vh;opacity:.65;}',
+    '#tvnav-launch .tl-tile.on{transform:scale(1.08);background:rgba(255,255,255,.15);box-shadow:0 2vh 6vh rgba(0,0,0,.55);}',
+    '#tvnav-launch .tl-hint{position:absolute;bottom:5vh;font-size:2.4vh;opacity:.55;}',
+    '#tvnav-launch .tl-msg{position:absolute;bottom:11vh;font-size:3vh;color:#ffc400;}'
+  ].join('');
+  var DAYS = ['niedziela', 'poniedziałek', 'wtorek', 'środa', 'czwartek', 'piątek', 'sobota'];
+  var MONTHS = ['stycznia', 'lutego', 'marca', 'kwietnia', 'maja', 'czerwca', 'lipca', 'sierpnia', 'września', 'października', 'listopada', 'grudnia'];
+
+  function shouldLaunch() {
+    if (!window.__tvNavLoader || location.pathname === TEST_PATH) return false;
+    try { if (window.top !== window) return false; } catch (e) { return false; }
+    if (load('tvnav:launcher', 1) === 0) return false;
+    try {
+      if (sessionStorage.getItem('tvnav:ses')) return false;
+      sessionStorage.setItem('tvnav:ses', '1');
+    } catch (e) { return false; }
+    return true;
+  }
+  function launcherClock() {
+    if (!LAUNCH.el) return;
+    var d = new Date(), h = d.getHours(), m = d.getMinutes();
+    LAUNCH.el.querySelector('.tl-clock').textContent = h + ':' + (m < 10 ? '0' : '') + m;
+    LAUNCH.el.querySelector('.tl-date').textContent = (h >= 5 && h < 18 ? 'Dzień dobry' : 'Dobry wieczór') + ' · ' +
+      DAYS[d.getDay()] + ', ' + d.getDate() + ' ' + MONTHS[d.getMonth()];
+  }
+  function launcherMute() {
+    var vs = document.querySelectorAll('video');
+    for (var i = 0; i < vs.length; i++) if (!vs[i].muted) { vs[i].muted = true; vs[i].__tvnavMuted = true; }
+  }
+  function launcherSel(i) {
+    LAUNCH.sel = (i + TILES.length) % TILES.length;
+    var ts = LAUNCH.el.querySelectorAll('.tl-tile');
+    for (var k = 0; k < ts.length; k++) {
+      var on = k === LAUNCH.sel;
+      ts[k].className = 'tl-tile' + (on ? ' on' : '');
+      ts[k].style.borderColor = on ? TILES[k].color : 'transparent';
+    }
+  }
+  function openLauncher() {
+    var st = document.createElement('style');
+    st.textContent = LAUNCH_CSS;
+    (document.head || document.documentElement).appendChild(st);
+    var h = '<div class="tl-top"><span class="tl-date"></span><span class="tl-clock"></span></div><h1>Co oglądamy?</h1><div class="tl-row">';
+    for (var i = 0; i < TILES.length; i++) {
+      h += '<div class="tl-tile" data-i="' + i + '"><span style="color:' + TILES[i].color + '">' + SVG[TILES[i].id] + '</span>' +
+        '<div class="tl-name">' + TILES[i].name + '</div><div class="tl-sub">' + TILES[i].sub + '</div></div>';
+    }
+    h += '</div><div class="tl-msg"></div><div class="tl-hint">◀ ▶ wybór · OK otwiera · cyfry 1–3</div>';
+    LAUNCH.el = document.createElement('div');
+    LAUNCH.el.id = 'tvnav-launch';
+    LAUNCH.el.innerHTML = h;
+    LAUNCH.el.addEventListener('click', function (e) {
+      var t = e.target;
+      while (t && t !== LAUNCH.el && !t.getAttribute('data-i')) t = t.parentNode;
+      if (t && t !== LAUNCH.el) launcherChoose(Number(t.getAttribute('data-i')));
+    });
+    document.body.appendChild(LAUNCH.el);
+    LAUNCH.open = true;
+    launcherSel(0);
+    launcherClock();
+    launcherMute();
+    LAUNCH.timer = setInterval(function () { launcherMute(); launcherClock(); }, 300);
+  }
+  function closeLauncher() {
+    LAUNCH.open = false;
+    clearInterval(LAUNCH.timer);
+    if (LAUNCH.el && LAUNCH.el.parentNode) LAUNCH.el.parentNode.removeChild(LAUNCH.el);
+    LAUNCH.el = null;
+    var vs = document.querySelectorAll('video');
+    for (var i = 0; i < vs.length; i++) if (vs[i].__tvnavMuted) { vs[i].muted = false; vs[i].__tvnavMuted = false; }
+    if (isTvPage() && state.current !== null) { var ch = currentChannel(); if (ch) showOsd(ch); }
+  }
+  // przejście na stronę startową TizenBrew z poleceniem w nazwie okna
+  function viaTizenBrew(go, label) {
+    if (history.length < 2) { LAUNCH.el.querySelector('.tl-msg').textContent = 'Nie mogę tego otworzyć — uruchom TizenBrew ponownie.'; return false; }
+    LAUNCH.busy = true;
+    save('tvnav:alset', 1);
+    LAUNCH.el.querySelector('.tl-msg').textContent = 'Otwieram ' + label + '…';
+    try { window.name = 'tvnav-go:' + go; } catch (e) { /* trudno */ }
+    setTimeout(function () { history.go(1 - history.length); }, 200);
+    return true;
+  }
+  function launcherChoose(i) {
+    if (LAUNCH.busy) return;
+    var t = TILES[i];
+    if (!t) return;
+    launcherSel(i);
+    if (t.id === 'tv') {
+      // za pierwszym razem przez TizenBrew — tam włączamy autostart Telewizji
+      if (!load('tvnav:alset', 0) && history.length > 1) { viaTizenBrew('tv', 'Telewizję'); return; }
+      closeLauncher();
+      return;
+    }
+    viaTizenBrew(t.id, t.id === 'youtube' ? 'YouTube' : 'menu TizenBrew');
+  }
+  function launcherKey(e) {
+    var c = e.keyCode, d = digitOf(e);
+    stop(e);
+    if (c === K.LEFT) launcherSel(LAUNCH.sel - 1);
+    else if (c === K.RIGHT) launcherSel(LAUNCH.sel + 1);
+    else if (c === K.ENTER) launcherChoose(LAUNCH.sel);
+    else if (d !== null && Number(d) >= 1 && Number(d) <= TILES.length) launcherChoose(Number(d) - 1);
+    else if (c === K.BACK) { try { tizen.application.getCurrentApplication().exit(); } catch (e2) { /* poza telewizorem */ } }
   }
 
   // ---------------------------------------------------------------- start
@@ -1895,6 +2084,8 @@
     if (!document.body) { document.addEventListener('DOMContentLoaded', init); return; }
     try { ['tvnav:robi', 'tvnav:robres', 'tvnav:robok'].forEach(function (k) { localStorage.removeItem(k); }); } catch (e) { /* trudno */ }
     buildUi();
+    try { if (/^tvnav-go:/.test(window.name)) window.name = ''; } catch (e) { /* trudno */ }
+    if (shouldLaunch()) openLauncher();
     watchDrm();
     renderDiag();
     if (DIAG_ON) setTimeout(runProbes, 1500);
